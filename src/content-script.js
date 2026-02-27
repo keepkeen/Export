@@ -122,7 +122,8 @@
     selection: 'ced-selection',
     dock: 'ced-dock',
     fileName: 'ced-filename',
-    formulaCopyFormat: 'ced-formula-copy-format'
+    formulaCopyFormat: 'ced-formula-copy-format',
+    timelineEnabled: 'ced-timeline-enabled'
   };
 
   const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
@@ -332,7 +333,8 @@
     widgetGuardObserver: null,
     isWidgetDragging: false,
     parseMode: 'normal',
-    formulaCopyFormat: 'latex'
+    formulaCopyFormat: 'latex',
+    timelineEnabled: true
   };
 
   // --- 初始化 ---
@@ -364,6 +366,7 @@
     attachWidget();
     attachPanel();
     initFormulaCopyFeature();
+    initTimelineFeature();
     await refreshConversationData();
     observeConversation();
   }
@@ -402,7 +405,8 @@
       [STORAGE_KEYS.format]: state.selectedFormat,
       [STORAGE_KEYS.dock]: state.panelSide,
       [STORAGE_KEYS.fileName]: state.fileName,
-      [STORAGE_KEYS.formulaCopyFormat]: state.formulaCopyFormat
+      [STORAGE_KEYS.formulaCopyFormat]: state.formulaCopyFormat,
+      [STORAGE_KEYS.timelineEnabled]: state.timelineEnabled
     };
     const stored = await new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
     if (stored[STORAGE_KEYS.widget]) state.widgetPosition = stored[STORAGE_KEYS.widget];
@@ -411,6 +415,10 @@
     if (typeof stored[STORAGE_KEYS.fileName] === 'string') state.fileName = stored[STORAGE_KEYS.fileName];
     if (stored[STORAGE_KEYS.formulaCopyFormat]) state.formulaCopyFormat = stored[STORAGE_KEYS.formulaCopyFormat];
     state.formulaCopyFormat = normalizeFormulaCopyFormat(state.formulaCopyFormat);
+    if (typeof stored[STORAGE_KEYS.timelineEnabled] === 'boolean') {
+      state.timelineEnabled = stored[STORAGE_KEYS.timelineEnabled];
+    }
+    state.timelineEnabled = normalizeTimelineEnabled(state.timelineEnabled);
   }
 
   function persist(key, value) {
@@ -547,6 +555,7 @@
     body.appendChild(buildFormatSection());
     if (SITE_KEY === SITE_KEYS.chatgpt) {
       body.appendChild(buildFormulaCopySection());
+      body.appendChild(buildTimelineSection());
     }
     body.appendChild(buildFileNameSection());
     body.appendChild(buildTurnsSection());
@@ -659,6 +668,35 @@
     return section;
   }
 
+  function buildTimelineSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">时间轴</div>';
+
+    const row = document.createElement('label');
+    row.className = 'ced-toggle-row';
+    row.innerHTML = `
+      <input type="checkbox" class="ced-toggle-row__checkbox">
+      <div class="ced-toggle-row__content">
+        <div class="ced-toggle-row__label">启用会话时间轴</div>
+        <div class="ced-toggle-row__hint">左侧显示关键轮次，点击可快速跳转</div>
+      </div>
+    `;
+
+    const checkbox = row.querySelector('.ced-toggle-row__checkbox');
+    if (checkbox instanceof HTMLInputElement) {
+      checkbox.checked = state.timelineEnabled;
+      checkbox.addEventListener('change', () => {
+        state.timelineEnabled = checkbox.checked;
+        persist(STORAGE_KEYS.timelineEnabled, state.timelineEnabled);
+        syncTimelineFeatureConfig();
+      });
+    }
+
+    section.appendChild(row);
+    return section;
+  }
+
   function buildTurnsSection() {
     const section = document.createElement('section');
     section.className = 'ced-section';
@@ -757,7 +795,10 @@
     }
     state.selectedTurnIds = nextSelection;
 
-    if (token === state.lastRefreshToken) updateTurnList();
+    if (token === state.lastRefreshToken) {
+      updateTurnList();
+      refreshTimelineFeature();
+    }
   }
 
   function collectConversationTurns() {
@@ -816,7 +857,7 @@
 
   function isLikelyMessageNode(node) {
     if (!(node instanceof HTMLElement)) return false;
-    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast')) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip')) return false;
 
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -1097,6 +1138,10 @@
     return 'latex';
   }
 
+  function normalizeTimelineEnabled(value) {
+    return value !== false;
+  }
+
   function initFormulaCopyFeature() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     state.formulaCopyFormat = normalizeFormulaCopyFormat(state.formulaCopyFormat);
@@ -1113,6 +1158,34 @@
     if (window.__cedFormulaCopy?.setFormat) {
       window.__cedFormulaCopy.setFormat(state.formulaCopyFormat);
     }
+  }
+
+  function initTimelineFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.timelineEnabled = normalizeTimelineEnabled(state.timelineEnabled);
+    if (window.__cedTimeline?.initialize) {
+      window.__cedTimeline.initialize({
+        enabled: state.timelineEnabled,
+        markerRole: 'user',
+        maxMarkers: 320,
+        getTurns: () => state.turns,
+        messageTurnSelector: SELECTORS.MESSAGE_TURN,
+        userRoleSelector: SELECTORS.ROLE_USER,
+        scrollContainerSelectors: SCROLL_CONTAINER_SELECTORS
+      });
+    }
+  }
+
+  function syncTimelineFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.timelineEnabled = normalizeTimelineEnabled(state.timelineEnabled);
+    window.__cedTimeline?.setEnabled?.(state.timelineEnabled);
+    refreshTimelineFeature();
+  }
+
+  function refreshTimelineFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    window.__cedTimeline?.refresh?.();
   }
 
   function annotateImages(node) {
@@ -1517,7 +1590,7 @@
 
         controls.forEach((control) => {
           if (!(control instanceof HTMLElement)) return;
-          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast')) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip')) return;
           if (control.matches('[aria-expanded="true"]')) return;
           if (control instanceof HTMLButtonElement && control.disabled) return;
           if (isClaudeActionBarControl(control)) return;
@@ -1939,7 +2012,7 @@
     const addIfSafe = (node) => {
       if (!(node instanceof HTMLElement)) return;
       if (node === root) return;
-      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast')) {
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip')) {
         removable.add(node);
         return;
       }
@@ -1987,7 +2060,7 @@
     const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
     const clonedRoot = sourceRoot.cloneNode(true);
 
-    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast'].forEach((selector) => {
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip'].forEach((selector) => {
       clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
     });
     clonedRoot.querySelectorAll('.ced-formula-node').forEach((el) => {
@@ -2043,7 +2116,7 @@
 <base href="${escapeHtml(location.origin + '/')}">
 ${headClone.innerHTML}
 <style>
-  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn {
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip {
     display: none !important;
   }
   [data-testid*="composer"],

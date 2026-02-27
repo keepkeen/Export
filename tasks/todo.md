@@ -78,3 +78,40 @@
   - `node --check src/content-script.js`
   - `node --check src/formula-copy-feature.js`
   - `node --check src/service-worker.js`
+
+---
+
+## Iteration 3 Goal
+- 先迁移 `gemini-voyager` 的 timeline 能力到 ChatGPT 页面。
+- 保持代码职责分离，timeline 作为独立模块接入当前扩展。
+
+## Iteration 3 Plan
+- [x] 盘点 `gemini-voyager` timeline 核心能力（标记点、预览、跳转、滚动高亮）。
+- [x] 新建独立 `timeline-feature` 模块，封装 UI/交互/滚动同步逻辑。
+- [x] 接入 `content-script` 装配层与配置持久化（面板开关 + storage）。
+- [x] 适配导出链路，确保 timeline UI 不进入解析/导出内容。
+- [x] 完成语法检查与关键字符串回归。
+
+## Iteration 3 Acceptance
+- [x] ChatGPT 页面出现左侧时间轴，点击标记可跳转到对应轮次。
+- [x] 时间轴当前标记会随滚动位置更新高亮。
+- [x] 面板可开关 timeline，配置持久化。
+- [x] 时间轴元素不会被导出到 HTML/PDF/截图等结果中。
+
+## Iteration 3 Review
+- 新增模块：
+  - `src/timeline-feature.js`
+  - 独立封装：标记收集、轨道渲染、点击跳转、滚动高亮、悬浮提示、URL 变化刷新。
+- 装配改动：
+  - `manifest.json` 注入 `src/timeline-feature.js`
+  - `src/content-script.js` 新增 timeline 初始化、配置同步、面板开关和 storage key。
+- 样式改动：
+  - `src/styles.css` 新增 timeline bar/dot/tooltip 与面板开关样式。
+- 导出隔离：
+  - 在解析过滤、快照克隆与内嵌导出样式中排除 `.ced-timeline-bar` / `.ced-timeline-tooltip`。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/formula-copy-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/service-worker.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）

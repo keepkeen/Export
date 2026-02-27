@@ -47,6 +47,7 @@
         "vendor/html2canvas-pro.min.js",
         "vendor/jspdf.umd.min.js",
         "src/formula-copy-feature.js",
+        "src/timeline-feature.js",
         "src/content-script.js"
       ],
       "css": ["src/styles.css"],
