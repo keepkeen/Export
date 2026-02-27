@@ -349,7 +349,11 @@
     markdownPatcherEnabled: true,
     snowEffectEnabled: true,
     timelineRefreshTimer: null,
-    timelineSummaryCache: new WeakMap()
+    timelineSummaryCache: new WeakMap(),
+    timelineTurnsCache: {
+      signature: '',
+      turns: []
+    }
   };
 
   // --- 初始化 ---
@@ -1009,7 +1013,7 @@
 
   function isLikelyMessageNode(node) {
     if (!(node instanceof HTMLElement)) return false;
-    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return false;
 
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -1451,7 +1455,19 @@
     const nodes = (fastNodes.length ? fastNodes : dedupeMessageNodes(Array.from(document.querySelectorAll(SELECTORS.MESSAGE_TURN))))
       .filter((node) => node instanceof HTMLElement);
 
-    return nodes.map((node, index) => {
+    if (!nodes.length) {
+      state.timelineTurnsCache = { signature: '', turns: [] };
+      return [];
+    }
+
+    const firstId = nodes[0]?.getAttribute('data-testid') || '';
+    const lastId = nodes[nodes.length - 1]?.getAttribute('data-testid') || '';
+    const signature = `${nodes.length}|${firstId}|${lastId}`;
+    if (state.timelineTurnsCache.signature === signature && Array.isArray(state.timelineTurnsCache.turns) && state.timelineTurnsCache.turns.length) {
+      return state.timelineTurnsCache.turns;
+    }
+
+    const turns = nodes.map((node, index) => {
       const role = detectNodeRole(node);
       const contentNode = resolveContentNode(node, role) || node;
       const text = getTimelineSummaryText(contentNode);
@@ -1466,6 +1482,9 @@
         preview: text
       };
     }).filter((turn) => turn.node instanceof HTMLElement);
+
+    state.timelineTurnsCache = { signature, turns };
+    return turns;
   }
 
   function getTimelineSummaryText(node) {
@@ -2169,7 +2188,7 @@
 
         controls.forEach((control) => {
           if (!(control instanceof HTMLElement)) return;
-          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return;
           if (control.matches('[aria-expanded="true"]')) return;
           if (control instanceof HTMLButtonElement && control.disabled) return;
           if (isClaudeActionBarControl(control)) return;
@@ -2591,7 +2610,7 @@
     const addIfSafe = (node) => {
       if (!(node instanceof HTMLElement)) return;
       if (node === root) return;
-      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) {
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) {
         removable.add(node);
         return;
       }
@@ -2639,7 +2658,7 @@
     const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
     const clonedRoot = sourceRoot.cloneNode(true);
 
-    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-export-quick', '.ced-timeline-context-menu', '.ced-snow-effect-canvas'].forEach((selector) => {
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-preview-export', '.ced-timeline-export-quick', '.ced-timeline-context-menu', '.ced-snow-effect-canvas'].forEach((selector) => {
       clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
     });
     clonedRoot.querySelectorAll('.ced-formula-node').forEach((el) => {
@@ -2695,7 +2714,7 @@
 <base href="${escapeHtml(location.origin + '/')}">
 ${headClone.innerHTML}
 <style>
-  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas {
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas {
     display: none !important;
   }
   [data-testid*="composer"],

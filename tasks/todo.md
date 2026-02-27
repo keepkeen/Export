@@ -432,3 +432,51 @@
 - 发布：
   - Commit: `37263da`
   - Push: `origin/main` 已完成（`952e855..37263da`）。
+
+---
+
+## Iteration 11 Goal
+- 继续优化时间线响应速度，点击圆点立即跳转并高亮。
+- 支持滚轮滚动时自动检测当前对话位置并高亮对应圆点。
+- 圆点在时间线上按从上到下均匀分布（比例布局），不再使用固定像素间距导致聚集。
+- 调整预览与导出 UI，减少浮层切换成本，提升点击效率。
+
+## Iteration 11 Plan
+- [x] 重构圆点布局为百分比均匀分布，并移除固定间距/轨道内部滚动耦合逻辑。
+- [x] 优化跳转链路：缩短动画时长、点击即高亮、滚动结束保持目标圆点激活。
+- [x] 强化滚动联动：滚轮和页面滚动过程中持续计算活动轮次并同步高亮。
+- [x] 合并预览与导出交互到同一面板（预览列表 + 导出控件），精简悬浮控件。
+- [x] 完成语法检查、打包与 review 记录。
+
+## Iteration 11 Acceptance
+- [x] 点击任意圆点后可快速跳转，且目标圆点立即亮起并保持激活。
+- [x] 页面滚轮滚动过程中，时间线会自动跟随当前阅读位置更新高亮圆点。
+- [x] 圆点沿时间线从上到下均匀铺开，不再出现固定间距导致的上部聚集。
+- [x] 预览与导出在同一个面板内完成，点击路径更短、交互更直接。
+
+## Iteration 11 Review
+- 时间线性能与高亮：
+  - `src/timeline-feature.js`
+    - 活动点节流间隔从 `72ms` 降至 `40ms`，滚动跟随更及时。
+    - 跳转基础时长从 `520ms` 降到 `240ms`，并限制在 `120-360ms` 区间。
+    - 点击圆点后先 `setActiveIndex` 再滚动，保证“先亮再跳”。
+    - 增加滚动中周期性 `computeMarkerTops()` 刷新，提升长对话动态布局下的命中准确率。
+- 圆点分布：
+  - `src/timeline-feature.js`
+    - 由像素间隔改为比例布局：`index/(total-1)` 映射到 `0%-100%`，全轨道均匀分布。
+    - 移除轨道内部滚动同步逻辑，时间线点位始终完整可见。
+- 预览/导出 UI：
+  - `src/timeline-feature.js`
+    - 将导出控件并入 `ced-timeline-preview-panel`，形成“搜索/预览/导出”单面板。
+    - 预览按钮改为 `预览/导出`，放大可点击区域。
+  - `src/styles.css`
+    - 预览面板改为列式布局，列表区与导出区合并展示。
+    - 删除独立 `ced-timeline-export-quick` 浮层样式。
+- 轻量数据优化：
+  - `src/content-script.js`
+    - `collectTimelineTurnsFast` 新增签名缓存（数量+首尾 id），未变化时直接复用 turns。
+- 验证：
+  - `node --check src/timeline-feature.js`
+  - `node --check src/content-script.js`
+  - `node --check src/popup.js`
+  - `node --check src/service-worker.js`

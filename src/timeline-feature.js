@@ -10,11 +10,8 @@
   };
 
   const SEARCH_DEBOUNCE_MS = 200;
-  const ACTIVE_CHANGE_INTERVAL_MS = 72;
-  const BASE_SCROLL_DURATION_MS = 520;
-  const DOT_MIN_GAP_PX = 18;
-  const DOT_MAX_GAP_PX = 38;
-  const DOT_EDGE_PADDING_PX = 10;
+  const ACTIVE_CHANGE_INTERVAL_MS = 40;
+  const BASE_SCROLL_DURATION_MS = 240;
   const DOT_NEAR_TOLERANCE_PX = 14;
   const EXPORT_FILENAME_DEBOUNCE_MS = 220;
 
@@ -138,6 +135,7 @@
       this.activeChangeTimer = null;
       this.pendingActiveIndex = -1;
       this.lastActiveChangeAt = 0;
+      this.lastMarkerTopRefreshAt = 0;
       this.markerTops = [];
       this.dotOffsets = [];
       this.exportFileNameTimer = null;
@@ -346,7 +344,7 @@
         const previewToggle = document.createElement('button');
         previewToggle.type = 'button';
         previewToggle.className = 'ced-timeline-preview-toggle';
-        previewToggle.textContent = '预览';
+        previewToggle.textContent = '预览/导出';
         previewToggle.setAttribute('aria-label', 'Toggle timeline preview');
         document.body.appendChild(previewToggle);
         this.ui.previewToggle = previewToggle;
@@ -364,6 +362,18 @@
             <input type="text" class="ced-timeline-preview-search" placeholder="搜索轮次摘要">
           </div>
           <div class="ced-timeline-preview-list" role="listbox"></div>
+          <div class="ced-timeline-preview-export">
+            <div class="ced-timeline-preview-export__title">导出设置</div>
+            <label class="ced-timeline-preview-export__field">
+              <span>格式</span>
+              <select class="ced-timeline-export-format"></select>
+            </label>
+            <label class="ced-timeline-preview-export__field">
+              <span>文件名</span>
+              <input type="text" class="ced-timeline-export-filename" placeholder="自动使用会话标题">
+            </label>
+            <button type="button" class="ced-timeline-export-now">立即导出</button>
+          </div>
         `;
         document.body.appendChild(previewPanel);
         this.ui.previewPanel = previewPanel;
@@ -371,31 +381,10 @@
 
       this.ui.previewSearch = this.ui.previewPanel.querySelector('.ced-timeline-preview-search');
       this.ui.previewList = this.ui.previewPanel.querySelector('.ced-timeline-preview-list');
-
-      const existingExportQuick = document.querySelector('.ced-timeline-export-quick');
-      if (existingExportQuick instanceof HTMLElement) {
-        this.ui.exportQuick = existingExportQuick;
-      } else {
-        const exportQuick = document.createElement('section');
-        exportQuick.className = 'ced-timeline-export-quick';
-        exportQuick.innerHTML = `
-          <div class="ced-timeline-export-quick__title">导出设置</div>
-          <label class="ced-timeline-export-quick__field">
-            <span>格式</span>
-            <select class="ced-timeline-export-format"></select>
-          </label>
-          <label class="ced-timeline-export-quick__field">
-            <span>文件名</span>
-            <input type="text" class="ced-timeline-export-filename" placeholder="自动使用会话标题">
-          </label>
-          <button type="button" class="ced-timeline-export-now">立即导出</button>
-        `;
-        document.body.appendChild(exportQuick);
-        this.ui.exportQuick = exportQuick;
-      }
-      this.ui.exportFormat = this.ui.exportQuick?.querySelector('.ced-timeline-export-format') || null;
-      this.ui.exportFileName = this.ui.exportQuick?.querySelector('.ced-timeline-export-filename') || null;
-      this.ui.exportNow = this.ui.exportQuick?.querySelector('.ced-timeline-export-now') || null;
+      this.ui.exportQuick = this.ui.previewPanel.querySelector('.ced-timeline-preview-export');
+      this.ui.exportFormat = this.ui.previewPanel.querySelector('.ced-timeline-export-format');
+      this.ui.exportFileName = this.ui.previewPanel.querySelector('.ced-timeline-export-filename');
+      this.ui.exportNow = this.ui.previewPanel.querySelector('.ced-timeline-export-now');
 
       const existingContextMenu = document.querySelector('.ced-timeline-context-menu');
       if (existingContextMenu instanceof HTMLElement) {
@@ -424,9 +413,6 @@
       }
       if (this.ui.previewPanel?.parentNode) {
         this.ui.previewPanel.parentNode.removeChild(this.ui.previewPanel);
-      }
-      if (this.ui.exportQuick?.parentNode) {
-        this.ui.exportQuick.parentNode.removeChild(this.ui.exportQuick);
       }
       if (this.ui.contextMenu?.parentNode) {
         this.ui.contextMenu.parentNode.removeChild(this.ui.contextMenu);
@@ -555,20 +541,6 @@
       return this.scrollContainer.clientHeight || window.innerHeight;
     }
 
-    getContainerScrollHeight() {
-      if (!this.scrollContainer || this.scrollContainer === document.body || this.scrollContainer === document.documentElement) {
-        return document.scrollingElement?.scrollHeight
-          || document.documentElement.scrollHeight
-          || document.body.scrollHeight
-          || 0;
-      }
-      return this.scrollContainer.scrollHeight || 0;
-    }
-
-    getMaxContainerScrollTop() {
-      return Math.max(0, this.getContainerScrollHeight() - this.getContainerClientHeight());
-    }
-
     getContainerRect() {
       if (!this.scrollContainer || this.scrollContainer === document.body || this.scrollContainer === document.documentElement) {
         return {
@@ -593,9 +565,15 @@
     computeMarkerTops() {
       if (!this.markers.length) {
         this.markerTops = [];
+        this.lastMarkerTopRefreshAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+          ? performance.now()
+          : Date.now();
         return;
       }
       this.markerTops = this.markers.map((marker) => this.getElementOffsetTopInContainer(marker.element));
+      this.lastMarkerTopRefreshAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? performance.now()
+        : Date.now();
     }
 
     upperBound(arr, value) {
@@ -721,12 +699,8 @@
 
       const total = this.markers.length;
       const trackHeight = Math.max(1, this.ui.track.clientHeight || 1);
-      const fitGap = total <= 1
-        ? trackHeight
-        : (trackHeight - (DOT_EDGE_PADDING_PX * 2) - 12) / Math.max(1, total - 1);
-      const gap = clamp(fitGap, DOT_MIN_GAP_PX, DOT_MAX_GAP_PX);
-      const contentHeight = Math.max(trackHeight, Math.round((DOT_EDGE_PADDING_PX * 2) + 12 + (Math.max(0, total - 1) * gap)));
-      this.ui.dots.style.height = `${contentHeight}px`;
+      this.ui.dots.style.height = '100%';
+      this.ui.track.scrollTop = 0;
 
       const frag = document.createDocumentFragment();
       this.markers.forEach((marker, index) => {
@@ -737,17 +711,14 @@
         dot.dataset.summary = marker.summary;
         dot.dataset.markerId = marker.id;
         dot.setAttribute('aria-label', marker.summary || `Turn ${index + 1}`);
-        const offset = total <= 1
-          ? Math.round(contentHeight / 2)
-          : Math.round(DOT_EDGE_PADDING_PX + 6 + (index * gap));
-        dot.style.top = `${offset}px`;
-        this.dotOffsets[index] = offset;
+        const n = total <= 1 ? 0.5 : index / (total - 1);
+        dot.style.top = `${(n * 100).toFixed(4)}%`;
+        this.dotOffsets[index] = n * trackHeight;
         marker.dot = dot;
         this.syncDotState(marker);
         frag.appendChild(dot);
       });
       this.ui.dots.appendChild(frag);
-      this.syncTrackScrollFromContainer();
     }
 
     renderPreviewList() {
@@ -796,7 +767,6 @@
         this.syncDotState(marker);
       });
       this.highlightPreviewActiveItem();
-      this.ensureTrackVisible(nextIndex);
     }
 
     scheduleActiveIndex(nextIndex) {
@@ -846,41 +816,12 @@
       }
     }
 
-    syncTrackScrollFromContainer() {
-      if (!this.ui.track) return;
-      const maxTrackScroll = Math.max(0, this.ui.track.scrollHeight - this.ui.track.clientHeight);
-      if (maxTrackScroll <= 1) {
-        this.ui.track.scrollTop = 0;
-        return;
-      }
-      const maxContainerScroll = this.getMaxContainerScrollTop();
-      if (maxContainerScroll <= 1) {
-        this.ui.track.scrollTop = 0;
-        return;
-      }
-      const ratio = clamp(this.getContainerScrollTop() / maxContainerScroll, 0, 1);
-      this.ui.track.scrollTop = ratio * maxTrackScroll;
-    }
-
-    ensureTrackVisible(index) {
-      if (!this.ui.track) return;
-      const marker = this.markers[index];
-      const dot = marker?.dot;
-      if (!(dot instanceof HTMLElement)) return;
-
-      const target = dot.offsetTop - (this.ui.track.clientHeight * 0.5);
-      const maxTrackScroll = Math.max(0, this.ui.track.scrollHeight - this.ui.track.clientHeight);
-      if (maxTrackScroll <= 0) return;
-      this.ui.track.scrollTop = clamp(target, 0, maxTrackScroll);
-    }
-
     updateActiveDotFromViewport() {
       if (!this.markers.length) {
         this.activeIndex = -1;
         this.highlightPreviewActiveItem();
         return;
       }
-      this.syncTrackScrollFromContainer();
       if (this.isProgrammaticScroll) return;
 
       const scrollTop = this.getContainerScrollTop();
@@ -911,19 +852,23 @@
         marker = this.markers[index] || this.markers.find((item) => item.id === marker?.id);
       }
       if (!marker?.element) return;
+      this.setActiveIndex(index);
       const viewportOffset = Math.round(this.getContainerClientHeight() * 0.18);
       const targetTop = Math.max(0, this.getElementOffsetTopInContainer(marker.element) - viewportOffset);
       const startTop = this.getContainerScrollTop();
       const distance = Math.abs(targetTop - startTop);
       const span = Math.max(1, this.getContainerClientHeight());
-      const scale = Math.max(0.6, Math.min(1.7, distance / span));
-      const duration = Math.round(clamp(BASE_SCROLL_DURATION_MS * scale, 260, 920));
+      const scale = Math.max(0.45, Math.min(1.15, distance / span));
+      const duration = Math.round(clamp(BASE_SCROLL_DURATION_MS * scale, 120, 360));
       this.smoothScrollTo(targetTop, duration, () => {
         const currentTop = this.getContainerScrollTop();
         if (Math.abs(currentTop - targetTop) > 12) {
-          marker.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          marker.element.scrollIntoView({ behavior: 'auto', block: 'center' });
         }
-        this.scheduleActiveIndex(index);
+        this.setActiveIndex(index);
+        this.lastActiveChangeAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+          ? performance.now()
+          : Date.now();
       });
     }
 
@@ -1111,6 +1056,12 @@
       if (this.scrollRaf) return;
       this.scrollRaf = requestAnimationFrame(() => {
         this.scrollRaf = null;
+        const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+          ? performance.now()
+          : Date.now();
+        if ((now - this.lastMarkerTopRefreshAt) > 420) {
+          this.computeMarkerTops();
+        }
         this.updateActiveDotFromViewport();
       });
     }
@@ -1218,7 +1169,7 @@
       }
       if (target.closest('.ced-timeline-context-menu')) return;
       if (target.closest('.ced-timeline-dot')) return;
-      if (target.closest('.ced-timeline-export-quick')) return;
+      if (target.closest('.ced-timeline-preview-panel')) return;
       this.hideContextMenu();
     }
 
@@ -1291,7 +1242,7 @@
       if (!this.ui.track || !this.dotOffsets.length) return false;
       const rect = this.ui.track.getBoundingClientRect();
       if (clientY < rect.top || clientY > rect.bottom) return false;
-      const offsetY = clientY - rect.top + this.ui.track.scrollTop;
+      const offsetY = clientY - rect.top;
       const pivot = this.upperBound(this.dotOffsets, offsetY);
       const candidates = [pivot - 1, pivot, pivot + 1];
       return candidates.some((index) => {
@@ -1305,7 +1256,7 @@
       if (event.button !== 0) return;
       if (!(event.target instanceof HTMLElement)) return;
       if (event.target.closest('.ced-timeline-dot')) return;
-      if (event.target.closest('.ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu')) return;
+      if (event.target.closest('.ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu')) return;
       if (this.isPointerNearDot(event.clientY)) return;
       this.handleDragStart(event);
     }
@@ -1431,8 +1382,8 @@
       const shouldOpen = this.enabled && this.options.previewEnabled !== false && this.previewOpen;
       this.ui.previewPanel.classList.toggle('ced-timeline-preview-panel--visible', shouldOpen);
       this.ui.previewToggle.classList.toggle('active', shouldOpen);
-      const showExportQuick = shouldOpen && this.options.exportQuickEnabled !== false;
-      this.ui.exportQuick?.classList.toggle('ced-timeline-export-quick--visible', showExportQuick);
+      const showExport = this.options.exportQuickEnabled !== false;
+      this.ui.exportQuick?.toggleAttribute('hidden', !showExport);
       if (!shouldOpen) {
         this.hideContextMenu();
       } else {
@@ -1518,21 +1469,6 @@
         this.ui.previewPanel.style.left = `${Math.round(left)}px`;
         this.ui.previewPanel.style.top = `${Math.round(top)}px`;
       }
-
-      if (this.ui.exportQuick) {
-        const quickWidth = this.ui.exportQuick.offsetWidth || 280;
-        const quickHeight = this.ui.exportQuick.offsetHeight || 144;
-        const panelRect = this.ui.previewPanel?.getBoundingClientRect();
-        let left = panelRect?.left ?? (barRect.right + 46);
-        if (left + quickWidth > window.innerWidth - 8) {
-          left = Math.max(8, (panelRect?.right || barRect.left) - quickWidth);
-        }
-        left = clamp(left, 8, window.innerWidth - quickWidth - 8);
-        const anchorTop = panelRect ? panelRect.bottom + 8 : barRect.bottom + 8;
-        const top = clamp(anchorTop, 8, window.innerHeight - quickHeight - 8);
-        this.ui.exportQuick.style.left = `${Math.round(left)}px`;
-        this.ui.exportQuick.style.top = `${Math.round(top)}px`;
-      }
     }
 
     applyEnabledState() {
@@ -1540,7 +1476,6 @@
       const hidden = !this.enabled;
       this.ui.bar.classList.toggle('ced-timeline-bar--hidden', hidden);
       this.ui.previewToggle?.classList.toggle('ced-timeline-preview-toggle--hidden', hidden);
-      this.ui.exportQuick?.classList.toggle('ced-timeline-export-quick--hidden', hidden);
       if (hidden) {
         this.hideTooltip(true);
         this.hideContextMenu();
