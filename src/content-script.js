@@ -123,7 +123,9 @@
     dock: 'ced-dock',
     fileName: 'ced-filename',
     formulaCopyFormat: 'ced-formula-copy-format',
-    timelineEnabled: 'ced-timeline-enabled'
+    timelineEnabled: 'ced-timeline-enabled',
+    titleUpdaterEnabled: 'ced-title-updater-enabled',
+    titleUpdaterIncludeFolder: 'ced-title-updater-include-folder'
   };
 
   const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
@@ -334,7 +336,9 @@
     isWidgetDragging: false,
     parseMode: 'normal',
     formulaCopyFormat: 'latex',
-    timelineEnabled: true
+    timelineEnabled: true,
+    titleUpdaterEnabled: true,
+    titleUpdaterIncludeFolder: true
   };
 
   // --- 初始化 ---
@@ -364,9 +368,12 @@
     await hydrateSettings();
     injectToast();
     attachWidget();
-    attachPanel();
     initFormulaCopyFeature();
     initTimelineFeature();
+    initFolderFeature();
+    initPromptVaultFeature();
+    initTitleUpdaterFeature();
+    attachPanel();
     await refreshConversationData();
     observeConversation();
   }
@@ -406,7 +413,9 @@
       [STORAGE_KEYS.dock]: state.panelSide,
       [STORAGE_KEYS.fileName]: state.fileName,
       [STORAGE_KEYS.formulaCopyFormat]: state.formulaCopyFormat,
-      [STORAGE_KEYS.timelineEnabled]: state.timelineEnabled
+      [STORAGE_KEYS.timelineEnabled]: state.timelineEnabled,
+      [STORAGE_KEYS.titleUpdaterEnabled]: state.titleUpdaterEnabled,
+      [STORAGE_KEYS.titleUpdaterIncludeFolder]: state.titleUpdaterIncludeFolder
     };
     const stored = await new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
     if (stored[STORAGE_KEYS.widget]) state.widgetPosition = stored[STORAGE_KEYS.widget];
@@ -419,6 +428,14 @@
       state.timelineEnabled = stored[STORAGE_KEYS.timelineEnabled];
     }
     state.timelineEnabled = normalizeTimelineEnabled(state.timelineEnabled);
+    if (typeof stored[STORAGE_KEYS.titleUpdaterEnabled] === 'boolean') {
+      state.titleUpdaterEnabled = stored[STORAGE_KEYS.titleUpdaterEnabled];
+    }
+    if (typeof stored[STORAGE_KEYS.titleUpdaterIncludeFolder] === 'boolean') {
+      state.titleUpdaterIncludeFolder = stored[STORAGE_KEYS.titleUpdaterIncludeFolder];
+    }
+    state.titleUpdaterEnabled = normalizeTitleUpdaterEnabled(state.titleUpdaterEnabled);
+    state.titleUpdaterIncludeFolder = normalizeTitleUpdaterIncludeFolder(state.titleUpdaterIncludeFolder);
   }
 
   function persist(key, value) {
@@ -556,6 +573,15 @@
     if (SITE_KEY === SITE_KEYS.chatgpt) {
       body.appendChild(buildFormulaCopySection());
       body.appendChild(buildTimelineSection());
+      const folderSection = window.__cedFolder?.buildPanelSection?.();
+      if (folderSection instanceof HTMLElement) {
+        body.appendChild(folderSection);
+      }
+      const promptSection = window.__cedPromptVault?.buildPanelSection?.();
+      if (promptSection instanceof HTMLElement) {
+        body.appendChild(promptSection);
+      }
+      body.appendChild(buildTitleUpdaterSection());
     }
     body.appendChild(buildFileNameSection());
     body.appendChild(buildTurnsSection());
@@ -697,6 +723,57 @@
     return section;
   }
 
+  function buildTitleUpdaterSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">标签标题同步</div>';
+
+    const enableRow = document.createElement('label');
+    enableRow.className = 'ced-toggle-row';
+    enableRow.innerHTML = `
+      <input type="checkbox" class="ced-toggle-row__checkbox">
+      <div class="ced-toggle-row__content">
+        <div class="ced-toggle-row__label">启用标题自动同步</div>
+        <div class="ced-toggle-row__hint">会话标题变化时自动更新浏览器标签名</div>
+      </div>
+    `;
+
+    const includeFolderRow = document.createElement('label');
+    includeFolderRow.className = 'ced-toggle-row';
+    includeFolderRow.innerHTML = `
+      <input type="checkbox" class="ced-toggle-row__checkbox">
+      <div class="ced-toggle-row__content">
+        <div class="ced-toggle-row__label">标题包含文件夹前缀</div>
+        <div class="ced-toggle-row__hint">例如：[数学] 散度与迹 - ChatGPT</div>
+      </div>
+    `;
+
+    const enableCheckbox = enableRow.querySelector('.ced-toggle-row__checkbox');
+    const includeFolderCheckbox = includeFolderRow.querySelector('.ced-toggle-row__checkbox');
+
+    if (enableCheckbox instanceof HTMLInputElement) {
+      enableCheckbox.checked = state.titleUpdaterEnabled;
+      enableCheckbox.addEventListener('change', () => {
+        state.titleUpdaterEnabled = enableCheckbox.checked;
+        persist(STORAGE_KEYS.titleUpdaterEnabled, state.titleUpdaterEnabled);
+        syncTitleUpdaterFeatureConfig();
+      });
+    }
+
+    if (includeFolderCheckbox instanceof HTMLInputElement) {
+      includeFolderCheckbox.checked = state.titleUpdaterIncludeFolder;
+      includeFolderCheckbox.addEventListener('change', () => {
+        state.titleUpdaterIncludeFolder = includeFolderCheckbox.checked;
+        persist(STORAGE_KEYS.titleUpdaterIncludeFolder, state.titleUpdaterIncludeFolder);
+        syncTitleUpdaterFeatureConfig();
+      });
+    }
+
+    section.appendChild(enableRow);
+    section.appendChild(includeFolderRow);
+    return section;
+  }
+
   function buildTurnsSection() {
     const section = document.createElement('section');
     section.className = 'ced-section';
@@ -798,6 +875,8 @@
     if (token === state.lastRefreshToken) {
       updateTurnList();
       refreshTimelineFeature();
+      refreshFolderFeature();
+      refreshTitleUpdaterFeature();
     }
   }
 
@@ -857,7 +936,7 @@
 
   function isLikelyMessageNode(node) {
     if (!(node instanceof HTMLElement)) return false;
-    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip')) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu')) return false;
 
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -1142,6 +1221,59 @@
     return value !== false;
   }
 
+  function normalizeTitleUpdaterEnabled(value) {
+    return value !== false;
+  }
+
+  function normalizeTitleUpdaterIncludeFolder(value) {
+    return value !== false;
+  }
+
+  function extractConversationIdFromUrl(url) {
+    if (!url || typeof url !== 'string') return '';
+    const match = url.match(/\/c\/([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : '';
+  }
+
+  function getCurrentConversationId() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return '';
+    return extractConversationIdFromUrl(location.pathname) || extractConversationIdFromUrl(location.href);
+  }
+
+  function collectSidebarConversations() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return [];
+    const seen = new Set();
+    const list = [];
+    const selectors = [
+      'nav a[href*="/c/"]',
+      'aside a[href*="/c/"]',
+      'a[href*="/c/"]'
+    ];
+
+    selectors.forEach((selector) => {
+      Array.from(document.querySelectorAll(selector)).forEach((anchor) => {
+        if (!(anchor instanceof HTMLAnchorElement)) return;
+        const rawHref = anchor.getAttribute('href') || anchor.href || '';
+        const conversationId = extractConversationIdFromUrl(rawHref);
+        if (!conversationId || seen.has(conversationId)) return;
+        seen.add(conversationId);
+
+        const title = (anchor.textContent || anchor.getAttribute('aria-label') || conversationId)
+          .replace(/\s+/g, ' ')
+          .trim();
+        const url = new URL(rawHref, location.origin).href;
+        list.push({
+          id: conversationId,
+          title: title || conversationId,
+          url,
+          updatedAt: Date.now()
+        });
+      });
+    });
+
+    return list;
+  }
+
   function initFormulaCopyFeature() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     state.formulaCopyFormat = normalizeFormulaCopyFormat(state.formulaCopyFormat);
@@ -1168,6 +1300,9 @@
         enabled: state.timelineEnabled,
         markerRole: 'user',
         maxMarkers: 320,
+        shortcutEnabled: true,
+        draggable: true,
+        previewEnabled: true,
         getTurns: () => state.turns,
         messageTurnSelector: SELECTORS.MESSAGE_TURN,
         userRoleSelector: SELECTORS.ROLE_USER,
@@ -1186,6 +1321,76 @@
   function refreshTimelineFeature() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     window.__cedTimeline?.refresh?.();
+  }
+
+  function initFolderFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (window.__cedFolder?.initialize) {
+      window.__cedFolder.initialize({
+        onCurrentFolderChange: () => {
+          refreshTitleUpdaterFeature();
+        }
+      });
+    }
+  }
+
+  function refreshFolderFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    const currentConversationId = getCurrentConversationId();
+    const conversations = collectSidebarConversations();
+    window.__cedFolder?.refresh?.({
+      currentConversationId,
+      currentConversationTitle: state.pageTitle || detectConversationTitle(),
+      conversations
+    });
+  }
+
+  function initPromptVaultFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    window.__cedPromptVault?.initialize?.();
+  }
+
+  function initTitleUpdaterFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.titleUpdaterEnabled = normalizeTitleUpdaterEnabled(state.titleUpdaterEnabled);
+    state.titleUpdaterIncludeFolder = normalizeTitleUpdaterIncludeFolder(state.titleUpdaterIncludeFolder);
+    window.__cedTitleUpdater?.initialize?.({
+      enabled: state.titleUpdaterEnabled,
+      includeFolder: state.titleUpdaterIncludeFolder,
+      requestContext: () => ({
+        title: state.pageTitle || detectConversationTitle(),
+        folderName: getCurrentFolderNameForTitle(),
+        siteName: 'ChatGPT'
+      })
+    });
+  }
+
+  function syncTitleUpdaterFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.titleUpdaterEnabled = normalizeTitleUpdaterEnabled(state.titleUpdaterEnabled);
+    state.titleUpdaterIncludeFolder = normalizeTitleUpdaterIncludeFolder(state.titleUpdaterIncludeFolder);
+    window.__cedTitleUpdater?.setEnabled?.(state.titleUpdaterEnabled);
+    window.__cedTitleUpdater?.setIncludeFolder?.(state.titleUpdaterIncludeFolder);
+    refreshTitleUpdaterFeature();
+  }
+
+  function getCurrentFolderNameForTitle() {
+    const currentConversationId = getCurrentConversationId();
+    return window.__cedFolder?.getFolderName?.(currentConversationId) || '';
+  }
+
+  function refreshTitleUpdaterFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    const currentConversationId = getCurrentConversationId();
+    const title = state.pageTitle || detectConversationTitle();
+    const folderName = window.__cedFolder?.getFolderName?.(currentConversationId) || '';
+    window.__cedTitleUpdater?.setContext?.({
+      conversationId: currentConversationId,
+      title,
+      folderName,
+      siteName: 'ChatGPT'
+    });
+    window.__cedTitleUpdater?.refresh?.();
   }
 
   function annotateImages(node) {
@@ -1590,7 +1795,7 @@
 
         controls.forEach((control) => {
           if (!(control instanceof HTMLElement)) return;
-          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip')) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu')) return;
           if (control.matches('[aria-expanded="true"]')) return;
           if (control instanceof HTMLButtonElement && control.disabled) return;
           if (isClaudeActionBarControl(control)) return;
@@ -2012,7 +2217,7 @@
     const addIfSafe = (node) => {
       if (!(node instanceof HTMLElement)) return;
       if (node === root) return;
-      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip')) {
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu')) {
         removable.add(node);
         return;
       }
@@ -2060,7 +2265,7 @@
     const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
     const clonedRoot = sourceRoot.cloneNode(true);
 
-    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip'].forEach((selector) => {
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-context-menu'].forEach((selector) => {
       clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
     });
     clonedRoot.querySelectorAll('.ced-formula-node').forEach((el) => {
@@ -2116,7 +2321,7 @@
 <base href="${escapeHtml(location.origin + '/')}">
 ${headClone.innerHTML}
 <style>
-  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip {
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu {
     display: none !important;
   }
   [data-testid*="composer"],

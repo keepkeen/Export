@@ -115,3 +115,63 @@
   - `node --check src/timeline-feature.js`
   - `node --check src/service-worker.js`
   - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 4 Goal
+- 完成 `Timeline` 增强版迁移：星标、层级标记、预览面板、快捷键导航、拖拽位置。
+- 增加 `Folder` 会话文件夹管理：分组、排序、颜色与当前会话归档。
+- 增加 `Prompt Vault` 提示词管理：保存、检索、复制、一键插入。
+- 增加 `Title Updater`：标签标题自动同步当前会话名称（可联动文件夹前缀）。
+
+## Iteration 4 Plan
+- [x] 设计并实现独立 feature 模块：
+  - [x] `timeline-feature` 增强能力（meta 持久化 + 预览面板 + 键盘 + 拖拽）。
+  - [x] `folder-feature`（数据模型 + 存储 + 面板 UI + 当前会话绑定）。
+  - [x] `prompt-vault-feature`（存储 + 面板 UI + 插入输入框逻辑）。
+  - [x] `title-updater-feature`（SPA 路由监听 + 节流更新）。
+- [x] 在 `content-script` 装配层接入模块初始化、配置同步与刷新协同。
+- [x] 更新 `manifest` 注入顺序与 `styles`，补齐导出隔离（避免新 UI 进入导出）。
+- [x] 完成语法检查、打包验证与文档更新（README/todo）。
+
+## Iteration 4 Acceptance
+- [x] Timeline 支持：
+  - [x] dot 星标（可切换）与 1/2/3 层级标记（可切换）。
+  - [x] 预览面板搜索与点击跳转。
+  - [x] 键盘前后导航（默认 `Alt+Shift+↑/↓`）。
+  - [x] 可拖拽并持久化位置。
+- [x] Folder 支持：
+  - [x] 创建/重命名/删除文件夹，支持颜色。
+  - [x] 会话按文件夹分组显示，支持排序模式切换。
+  - [x] 当前会话可一键归档到指定文件夹。
+- [x] Prompt Vault 支持：
+  - [x] 提示词条目增删改查、标签检索。
+  - [x] 点击后可复制或插入到当前输入框。
+- [x] Title Updater 支持：
+  - [x] 当前对话标题变化后浏览器 tab title 同步更新。
+  - [x] 可附加文件夹前缀并可开关。
+
+## Iteration 4 Review
+- 新增模块：
+  - `src/folder-feature.js`
+  - `src/prompt-vault-feature.js`
+  - `src/title-updater-feature.js`
+  - `src/timeline-feature.js`（增强版重构）
+- 装配改动：
+  - `manifest.json` 注入 `folder/prompt/title` 三个 feature 脚本。
+  - `src/content-script.js` 新增模块初始化、Folder/Title 刷新联动、Title Updater 配置面板。
+  - 新增 ChatGPT 侧边栏会话采集并同步到 Folder 模块。
+- Timeline 增强：
+  - dot 右键菜单支持星标与 L1/L2/L3 层级。
+  - 预览面板（搜索、定位、当前高亮）。
+  - 键盘导航：`Alt+Shift+↑/↓`。
+  - 拖拽位置并通过 `chrome.storage.sync` 持久化。
+- 导出隔离：
+  - 导出过滤链路新增剔除：`.ced-timeline-preview-toggle` / `.ced-timeline-preview-panel` / `.ced-timeline-context-menu`。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/folder-feature.js`
+  - `node --check src/prompt-vault-feature.js`
+  - `node --check src/title-updater-feature.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）

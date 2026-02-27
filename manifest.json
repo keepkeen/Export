@@ -48,6 +48,9 @@
         "vendor/jspdf.umd.min.js",
         "src/formula-copy-feature.js",
         "src/timeline-feature.js",
+        "src/folder-feature.js",
+        "src/prompt-vault-feature.js",
+        "src/title-updater-feature.js",
         "src/content-script.js"
       ],
       "css": ["src/styles.css"],

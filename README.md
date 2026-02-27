@@ -34,6 +34,11 @@ Browser extension for exporting ChatGPT / Gemini / Claude / Grok conversations w
   - left-side marker rail for long conversation navigation
   - click marker to jump to the corresponding turn
   - highlight follows current scroll position
+  - star/level markers, preview panel, keyboard navigation, draggable position
+- ChatGPT workspace utilities:
+  - folder management (group / sort / color / current conversation assignment)
+  - prompt vault (save/search/copy/insert prompts)
+  - tab title updater (conversation title sync with optional folder prefix)
 - Shortcut and context-menu integration (`Ctrl/Cmd + Shift + Y`).
 
 ## Quick Start (Load Unpacked)
@@ -61,6 +66,10 @@ No dependency installation is required for local extension loading.
 - `manifest.json`: extension manifest and permissions.
 - `src/content-script.js`: UI + parsing + export logic.
 - `src/service-worker.js`: background logic (download transfer, context menu, commands).
+- `src/timeline-feature.js`: timeline navigation feature module.
+- `src/folder-feature.js`: conversation folder feature module.
+- `src/prompt-vault-feature.js`: prompt vault feature module.
+- `src/title-updater-feature.js`: tab title sync feature module.
 - `src/styles.css`: panel/toast/formula-copy styles.
 
 ### Build / Package
