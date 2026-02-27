@@ -116,12 +116,17 @@
     { id: 'mathml', label: 'MathML', description: '适配 Word 公式粘贴' }
   ];
 
+  const PANEL_TABS = {
+    export: 'export',
+    workspace: 'workspace'
+  };
+
   const STORAGE_KEYS = {
-    widget: 'ced-widget',
     format: 'ced-format',
     selection: 'ced-selection',
     dock: 'ced-dock',
     fileName: 'ced-filename',
+    panelTab: 'ced-panel-tab',
     formulaCopyFormat: 'ced-formula-copy-format',
     timelineEnabled: 'ced-timeline-enabled',
     titleUpdaterEnabled: 'ced-title-updater-enabled',
@@ -134,7 +139,6 @@
 
   const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
   const IMAGE_TOKEN_SUFFIX = '__';
-  const PEEK_DELAY_MS = 320;
 
   const SITE_KEYS = {
     chatgpt: 'chatgpt',
@@ -319,7 +323,6 @@
   const SITE_EXPORT_BASENAME = ACTIVE_SITE.exportBaseName || `${SITE_KEY}-export`;
 
   const state = {
-    widgetEl: null,
     panelEl: null,
     toastEl: null,
     observer: null,
@@ -329,16 +332,14 @@
     turns: [],
     selectedTurnIds: new Set(),
     panelSide: 'right',
-    widgetPosition: { x: null, y: 180, edge: 'right' },
     imageCache: new Map(),
     exporting: false,
     fileName: '',
     pageTitle: '',
     nameInput: null,
     peekTimer: null,
-    widgetGuardObserver: null,
-    isWidgetDragging: false,
     parseMode: 'normal',
+    activePanelTab: PANEL_TABS.export,
     formulaCopyFormat: 'latex',
     timelineEnabled: true,
     titleUpdaterEnabled: true,
@@ -346,7 +347,9 @@
     sidebarAutoHideEnabled: false,
     folderSpacing: 2,
     markdownPatcherEnabled: true,
-    snowEffectEnabled: false
+    snowEffectEnabled: true,
+    timelineRefreshTimer: null,
+    timelineSummaryCache: new WeakMap()
   };
 
   // --- 初始化 ---
@@ -364,18 +367,27 @@
         sendResponse?.({ ok: true });
         return true;
       }
+      if (message.type === 'CED_APPLY_SETTINGS_PATCH') {
+        const patch = message.patch && typeof message.patch === 'object' ? message.patch : null;
+        if (!patch) {
+          sendResponse?.({ ok: false, error: 'invalid patch' });
+          return true;
+        }
+        applySettingsPatch(patch);
+        sendResponse?.({ ok: true });
+        return true;
+      }
       return undefined;
     });
   }
 
-  init().catch((error) => console.error('[Chat Exporter] init failed', error));
+  init().catch((error) => console.error('[ChronoChat Studio] init failed', error));
 
   async function init() {
     await ensureDocumentReady();
     patchHtml2canvasColorParser();
     await hydrateSettings();
     injectToast();
-    attachWidget();
     initFormulaCopyFeature();
     initTimelineFeature();
     initFolderFeature();
@@ -420,10 +432,10 @@
   async function hydrateSettings() {
     if (!chrome?.storage?.sync) return;
     const defaults = {
-      [STORAGE_KEYS.widget]: state.widgetPosition,
       [STORAGE_KEYS.format]: state.selectedFormat,
       [STORAGE_KEYS.dock]: state.panelSide,
       [STORAGE_KEYS.fileName]: state.fileName,
+      [STORAGE_KEYS.panelTab]: state.activePanelTab,
       [STORAGE_KEYS.formulaCopyFormat]: state.formulaCopyFormat,
       [STORAGE_KEYS.timelineEnabled]: state.timelineEnabled,
       [STORAGE_KEYS.titleUpdaterEnabled]: state.titleUpdaterEnabled,
@@ -434,10 +446,14 @@
       [STORAGE_KEYS.snowEffectEnabled]: state.snowEffectEnabled
     };
     const stored = await new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
-    if (stored[STORAGE_KEYS.widget]) state.widgetPosition = stored[STORAGE_KEYS.widget];
     if (stored[STORAGE_KEYS.format]) state.selectedFormat = stored[STORAGE_KEYS.format];
+    state.selectedFormat = normalizeExportFormat(state.selectedFormat);
     if (stored[STORAGE_KEYS.dock]) state.panelSide = stored[STORAGE_KEYS.dock];
     if (typeof stored[STORAGE_KEYS.fileName] === 'string') state.fileName = stored[STORAGE_KEYS.fileName];
+    if (typeof stored[STORAGE_KEYS.panelTab] === 'string') {
+      state.activePanelTab = stored[STORAGE_KEYS.panelTab];
+    }
+    state.activePanelTab = normalizePanelTab(state.activePanelTab);
     if (stored[STORAGE_KEYS.formulaCopyFormat]) state.formulaCopyFormat = stored[STORAGE_KEYS.formulaCopyFormat];
     state.formulaCopyFormat = normalizeFormulaCopyFormat(state.formulaCopyFormat);
     if (typeof stored[STORAGE_KEYS.timelineEnabled] === 'boolean') {
@@ -475,186 +491,116 @@
     chrome.storage.sync.set({ [key]: value });
   }
 
-  function attachWidget() {
-    if (document.querySelector('.ced-floating-button')) return;
-    const button = document.createElement('button');
-    button.className = 'ced-floating-button';
-    button.innerHTML = `
-      <svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px;">
-        <path fill="none" stroke="white" stroke-width="1.5" d="M4 17l4-5 4 3 6-9" stroke-linecap="round" stroke-linejoin="round"></path>
-        <circle cx="6" cy="19" r="1.6" fill="white"></circle>
-        <circle cx="11.8" cy="15.2" r="1.6" fill="white"></circle>
-        <circle cx="18.5" cy="6" r="1.6" fill="white"></circle>
-      </svg>`;
-    document.body.appendChild(button);
-    state.widgetEl = button;
-    hydrateWidgetPosition();
-    enableDrag(button);
-    guardWidgetPresence();
-
-    button.addEventListener('click', (e) => {
-      if (button.dataset.cedDragged === 'true') {
-        button.dataset.cedDragged = 'false';
-        return;
-      }
-      togglePanel(true);
-      e.stopPropagation();
-    });
-  }
-
-  function hydrateWidgetPosition() {
-    const { y, edge } = state.widgetPosition;
-    const btn = state.widgetEl;
-    if (!btn) return;
-    btn.classList.remove('ced-docked-left', 'ced-docked-right');
-    if (edge === 'left') {
-      btn.style.left = '0';
-      btn.style.right = 'auto';
-      btn.classList.add('ced-docked-left');
-      state.panelSide = 'left';
-    } else {
-      btn.style.right = '0';
-      btn.style.left = 'auto';
-      btn.classList.add('ced-docked-right');
-      state.panelSide = 'right';
-    }
-    btn.style.top = `${y ?? 180}px`;
-  }
-
-  function enableDrag(button) {
-    let pointerId = null;
-    let start = null;
-
-    button.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
-      pointerId = e.pointerId;
-      const rect = button.getBoundingClientRect();
-      start = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-      button.setPointerCapture(pointerId);
-      button.dataset.cedDragged = 'false';
-      state.isWidgetDragging = true;
-      button.classList.remove('ced-docked-left', 'ced-docked-right');
-    });
-
-    button.addEventListener('pointermove', (e) => {
-      if (pointerId === null) return;
-      button.dataset.cedDragged = 'true';
-      const nextTop = Math.min(window.innerHeight - 60, Math.max(12, e.clientY - start.y));
-      const nextLeft = Math.min(window.innerWidth - 60, Math.max(12, e.clientX - start.x));
-      button.style.top = `${Math.round(nextTop)}px`;
-      button.style.left = `${Math.round(nextLeft)}px`;
-      button.style.right = 'auto';
-    });
-
-    const onUp = () => {
-      if (pointerId === null) return;
-      button.releasePointerCapture(pointerId);
-      pointerId = null;
-      state.isWidgetDragging = false;
-
-      const rect = button.getBoundingClientRect();
-      const distLeft = rect.left + rect.width / 2;
-      const distRight = window.innerWidth - (rect.right - rect.width / 2);
-
-      button.classList.remove('ced-docked-left', 'ced-docked-right');
-      if (distLeft <= distRight) {
-        button.style.left = '0';
-        button.style.right = 'auto';
-        state.panelSide = 'left';
-        button.classList.add('ced-docked-left');
-      } else {
-        button.style.right = '0';
-        button.style.left = 'auto';
-        state.panelSide = 'right';
-        button.classList.add('ced-docked-right');
-      }
-
-      persist(STORAGE_KEYS.dock, state.panelSide);
-      state.widgetPosition = {
-        x: 0,
-        y: parseFloat(button.style.top),
-        edge: state.panelSide
-      };
-      persist(STORAGE_KEYS.widget, state.widgetPosition);
-      if (state.panelEl) {
-        state.panelEl.classList.remove('ced-panel--left', 'ced-panel--right');
-        state.panelEl.classList.add(`ced-panel--${state.panelSide}`);
-      }
-    };
-
-    button.addEventListener('pointerup', onUp);
-    button.addEventListener('pointercancel', onUp);
-  }
-
   function attachPanel() {
     if (document.querySelector('.ced-panel')) return;
+    const workspaceEnabled = SITE_KEY === SITE_KEYS.chatgpt;
     const panel = document.createElement('aside');
     panel.className = `ced-panel ced-panel--${state.panelSide}`;
     panel.innerHTML = `
       <div class="ced-panel__header">
-        <div class="ced-panel__title">AI Chat Export</div>
+        <div class="ced-panel__title-wrap">
+          <div class="ced-panel__title">ChronoChat Studio</div>
+          <div class="ced-panel__subtitle">Timeline & Export</div>
+        </div>
         <button class="ced-button ced-button--ghost" data-ced-action="close">✕</button>
       </div>
-      <div class="ced-panel__body"></div>
+      <div class="ced-panel__body">
+        <div class="ced-panel__tabs${workspaceEnabled ? '' : ' ced-panel__tabs--single'}" role="tablist" aria-label="Panel Sections">
+          <button type="button" class="ced-panel__tab" data-ced-tab="${PANEL_TABS.export}" role="tab" aria-selected="false">导出</button>
+          ${workspaceEnabled ? `<button type="button" class="ced-panel__tab" data-ced-tab="${PANEL_TABS.workspace}" role="tab" aria-selected="false">工作区</button>` : ''}
+        </div>
+        <div class="ced-panel__tab-panels">
+          <div class="ced-panel__tab-panel" data-ced-tab-panel="${PANEL_TABS.export}" role="tabpanel"></div>
+          ${workspaceEnabled ? `<div class="ced-panel__tab-panel" data-ced-tab-panel="${PANEL_TABS.workspace}" role="tabpanel"></div>` : ''}
+        </div>
+      </div>
     `;
     document.body.appendChild(panel);
     state.panelEl = panel;
 
-    const body = panel.querySelector('.ced-panel__body');
-    body.appendChild(buildFormatSection());
-    if (SITE_KEY === SITE_KEYS.chatgpt) {
-      body.appendChild(buildFormulaCopySection());
-      body.appendChild(buildTimelineSection());
-      body.appendChild(buildSidebarAutoHideSection());
-      body.appendChild(buildFolderSpacingSection());
-      body.appendChild(buildMarkdownPatcherSection());
-      body.appendChild(buildSnowEffectSection());
-      const folderSection = window.__cedFolder?.buildPanelSection?.();
-      if (folderSection instanceof HTMLElement) {
-        body.appendChild(folderSection);
-      }
-      const promptSection = window.__cedPromptVault?.buildPanelSection?.();
-      if (promptSection instanceof HTMLElement) {
-        body.appendChild(promptSection);
-      }
-      body.appendChild(buildTitleUpdaterSection());
+    const exportPanel = panel.querySelector(`[data-ced-tab-panel="${PANEL_TABS.export}"]`);
+    if (exportPanel instanceof HTMLElement) {
+      exportPanel.appendChild(buildFormatSection());
+      exportPanel.appendChild(buildFileNameSection());
+      exportPanel.appendChild(buildTurnsSection());
+      exportPanel.appendChild(buildActionSection());
     }
-    body.appendChild(buildFileNameSection());
-    body.appendChild(buildTurnsSection());
-    body.appendChild(buildActionSection());
+
+    if (workspaceEnabled) {
+      const workspacePanel = panel.querySelector(`[data-ced-tab-panel="${PANEL_TABS.workspace}"]`);
+      if (workspacePanel instanceof HTMLElement) {
+        const folderSection = window.__cedFolder?.buildPanelSection?.();
+        if (folderSection instanceof HTMLElement) {
+          workspacePanel.appendChild(folderSection);
+        }
+        const promptSection = window.__cedPromptVault?.buildPanelSection?.();
+        if (promptSection instanceof HTMLElement) {
+          workspacePanel.appendChild(promptSection);
+        }
+        if (!folderSection && !promptSection) {
+          const empty = document.createElement('section');
+          empty.className = 'ced-section';
+          empty.innerHTML = `
+            <div class="ced-section__title">工作区</div>
+            <div class="ced-folder-empty">当前没有可展示的工作区模块</div>
+          `;
+          workspacePanel.appendChild(empty);
+        }
+      }
+    }
+    setPanelTab(state.activePanelTab, { persist: false });
 
     panel.addEventListener('click', (e) => {
+      const tabButton = e.target.closest('[data-ced-tab]');
+      if (tabButton instanceof HTMLButtonElement) {
+        setPanelTab(tabButton.dataset.cedTab, { persist: true });
+        return;
+      }
+
       const action = e.target.closest('[data-ced-action]')?.dataset.cedAction;
       if (action === 'close') togglePanel(false);
       if (action === 'select-all') handleSelectAll();
       if (action === 'export') exportSelection();
     });
 
-    panel.addEventListener('mouseenter', () => {
-      if (state.peekTimer) {
-        clearTimeout(state.peekTimer);
-        state.peekTimer = null;
+  }
+
+  function setPanelTab(nextTab, options = {}) {
+    const shouldPersist = options.persist !== false;
+    let normalized = normalizePanelTab(nextTab);
+    const panel = state.panelEl;
+    if (!panel) {
+      state.activePanelTab = normalized;
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.panelTab, state.activePanelTab);
       }
-      if (panel.classList.contains('ced-panel--peek')) {
-        panel.classList.remove('ced-panel--peek');
-        panel.classList.add('ced-panel--open');
-        state.widgetEl?.classList.add('ced-panel-is-open');
-        refreshConversationData();
-      }
+      return;
+    }
+
+    const tabs = Array.from(panel.querySelectorAll('.ced-panel__tab'));
+    const availableTabs = new Set(tabs.map((tab) => tab.dataset.cedTab).filter(Boolean));
+    if (!availableTabs.has(normalized)) {
+      normalized = PANEL_TABS.export;
+    }
+
+    state.activePanelTab = normalized;
+    tabs.forEach((tab) => {
+      const active = tab.dataset.cedTab === normalized;
+      tab.classList.toggle('ced-panel__tab--active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.tabIndex = active ? 0 : -1;
     });
 
-    panel.addEventListener('mouseleave', () => {
-      if (!panel.classList.contains('ced-panel--open')) return;
-      if (state.peekTimer) {
-        clearTimeout(state.peekTimer);
-      }
-      state.peekTimer = setTimeout(() => {
-        panel.classList.remove('ced-panel--open');
-        panel.classList.add('ced-panel--peek');
-        state.widgetEl?.classList.remove('ced-panel-is-open');
-        state.peekTimer = null;
-      }, PEEK_DELAY_MS);
+    panel.querySelectorAll('.ced-panel__tab-panel').forEach((panelEl) => {
+      if (!(panelEl instanceof HTMLElement)) return;
+      const active = panelEl.dataset.cedTabPanel === normalized;
+      panelEl.classList.toggle('ced-panel__tab-panel--active', active);
+      panelEl.toggleAttribute('hidden', !active);
     });
+
+    if (shouldPersist) {
+      persist(STORAGE_KEYS.panelTab, state.activePanelTab);
+    }
   }
 
   function buildFormatSection() {
@@ -667,6 +613,7 @@
     EXPORT_FORMATS.forEach((fmt) => {
       const btn = document.createElement('button');
       btn.className = 'ced-format-button';
+      btn.dataset.formatId = fmt.id;
       if (fmt.id === state.selectedFormat) btn.classList.add('ced-format-button--active');
       btn.innerHTML = `<div>${fmt.label}</div><small style="opacity:.65;font-size:12px;">${fmt.description}</small>`;
       btn.addEventListener('click', () => {
@@ -712,6 +659,7 @@
     FORMULA_COPY_FORMATS.forEach((fmt) => {
       const btn = document.createElement('button');
       btn.className = 'ced-option-button';
+      btn.dataset.formulaFormatId = fmt.id;
       if (fmt.id === state.formulaCopyFormat) btn.classList.add('ced-option-button--active');
       btn.innerHTML = `<div>${fmt.label}</div><small style="opacity:.72;font-size:12px;">${fmt.description}</small>`;
       btn.addEventListener('click', () => {
@@ -950,49 +898,22 @@
 
   function togglePanel(forceOpen) {
     const panel = state.panelEl;
-    const button = state.widgetEl;
-    if (!panel || !button) return;
+    if (!panel) return;
 
     const currentlyOpen = panel.classList.contains('ced-panel--open');
-    const currentlyPeeking = panel.classList.contains('ced-panel--peek');
-    let shouldOpen;
-    if (typeof forceOpen === 'boolean') {
-      shouldOpen = forceOpen;
-    } else if (currentlyPeeking) {
-      shouldOpen = true;
-    } else {
-      shouldOpen = !currentlyOpen;
-    }
+    const shouldOpen = typeof forceOpen === 'boolean' ? forceOpen : !currentlyOpen;
 
     if (state.peekTimer) {
       clearTimeout(state.peekTimer);
       state.peekTimer = null;
     }
     panel.classList.remove('ced-panel--left', 'ced-panel--right', 'ced-panel--open', 'ced-panel--peek');
-    button.classList.remove('ced-panel-is-open');
     panel.classList.add(`ced-panel--${state.panelSide}`);
 
     if (shouldOpen) {
       panel.classList.add('ced-panel--open');
-      button.classList.add('ced-panel-is-open');
       refreshConversationData();
     }
-  }
-
-  function guardWidgetPresence() {
-    if (state.widgetGuardObserver) state.widgetGuardObserver.disconnect();
-    if (!document.body) return;
-    state.widgetGuardObserver = new MutationObserver((mutations) => {
-      if (!state.widgetEl) return;
-      for (const mutation of mutations) {
-        const removed = Array.from(mutation.removedNodes);
-        if (removed.includes(state.widgetEl)) {
-          document.body.appendChild(state.widgetEl);
-          break;
-        }
-      }
-    });
-    state.widgetGuardObserver.observe(document.body, { childList: true });
   }
 
   // --- 数据解析 (Data Parsing) ---
@@ -1088,7 +1009,7 @@
 
   function isLikelyMessageNode(node) {
     if (!(node instanceof HTMLElement)) return false;
-    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return false;
 
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -1362,6 +1283,21 @@
     return normalizeLatexSource(latex);
   }
 
+  function normalizePanelTab(value) {
+    if (value === PANEL_TABS.workspace && SITE_KEY === SITE_KEYS.chatgpt) {
+      return PANEL_TABS.workspace;
+    }
+    return PANEL_TABS.export;
+  }
+
+  function normalizeExportFormat(format) {
+    const normalized = String(format || '').trim();
+    if (EXPORT_FORMATS.some((item) => item.id === normalized && item.id !== 'hide')) {
+      return normalized;
+    }
+    return 'text';
+  }
+
   function normalizeFormulaCopyFormat(format) {
     if (format === 'latex' || format === 'mathml' || format === 'no-dollar') {
       return format;
@@ -1473,7 +1409,11 @@
         shortcutEnabled: true,
         draggable: true,
         previewEnabled: true,
-        getTurns: () => state.turns,
+        exportQuickEnabled: true,
+        getTurns: collectTimelineTurnsFast,
+        getExportConfig: getTimelineExportConfig,
+        onExportConfigChange: applyTimelineExportConfigPatch,
+        onExportNow: triggerTimelineQuickExport,
         messageTurnSelector: SELECTORS.MESSAGE_TURN,
         userRoleSelector: SELECTORS.ROLE_USER,
         scrollContainerSelectors: SCROLL_CONTAINER_SELECTORS
@@ -1491,6 +1431,89 @@
   function refreshTimelineFeature() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     window.__cedTimeline?.refresh?.();
+  }
+
+  function scheduleTimelineRefresh() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (state.timelineRefreshTimer) {
+      clearTimeout(state.timelineRefreshTimer);
+    }
+    state.timelineRefreshTimer = setTimeout(() => {
+      state.timelineRefreshTimer = null;
+      refreshTimelineFeature();
+    }, 120);
+  }
+
+  function collectTimelineTurnsFast() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return [];
+    const fastNodes = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'))
+      .filter((node) => node instanceof HTMLElement);
+    const nodes = (fastNodes.length ? fastNodes : dedupeMessageNodes(Array.from(document.querySelectorAll(SELECTORS.MESSAGE_TURN))))
+      .filter((node) => node instanceof HTMLElement);
+
+    return nodes.map((node, index) => {
+      const role = detectNodeRole(node);
+      const contentNode = resolveContentNode(node, role) || node;
+      const text = getTimelineSummaryText(contentNode);
+      const id = node.dataset.cedMessageId
+        || node.getAttribute('data-testid')
+        || `timeline-${index}`;
+      return {
+        id: `${id}-${index}`,
+        role,
+        node,
+        text,
+        preview: text
+      };
+    }).filter((turn) => turn.node instanceof HTMLElement);
+  }
+
+  function getTimelineSummaryText(node) {
+    if (!(node instanceof HTMLElement)) return '';
+    const cached = state.timelineSummaryCache.get(node);
+    const seedNode = node.querySelector('p, li, h1, h2, h3, h4, pre, code') || node;
+    const raw = (seedNode.textContent || node.textContent || '').replace(/\s+/g, ' ').trim();
+    const signature = `${raw.length}:${raw.slice(0, 80)}`;
+    if (cached && cached.signature === signature) {
+      return cached.summary;
+    }
+    const summary = raw.length > 120 ? `${raw.slice(0, 119)}...` : raw;
+    state.timelineSummaryCache.set(node, { signature, summary });
+    return summary;
+  }
+
+  function getTimelineExportConfig() {
+    return {
+      formats: EXPORT_FORMATS
+        .filter((item) => item.id !== 'hide')
+        .map((item) => ({ id: item.id, label: item.label })),
+      selectedFormat: state.selectedFormat,
+      fileName: state.fileName
+    };
+  }
+
+  function applyTimelineExportConfigPatch(patch) {
+    if (!patch || typeof patch !== 'object') return;
+    if (Object.prototype.hasOwnProperty.call(patch, 'format')) {
+      const nextFormat = normalizeExportFormat(patch.format);
+      if (nextFormat !== state.selectedFormat) {
+        state.selectedFormat = nextFormat;
+        persist(STORAGE_KEYS.format, state.selectedFormat);
+        syncFormatButtonsUI();
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'fileName')) {
+      const nextName = String(patch.fileName || '').trim();
+      if (nextName !== state.fileName) {
+        state.fileName = nextName;
+        persist(STORAGE_KEYS.fileName, state.fileName);
+        syncFileNameInputUI();
+      }
+    }
+  }
+
+  function triggerTimelineQuickExport() {
+    exportSelection();
   }
 
   function initFolderFeature() {
@@ -1618,6 +1641,129 @@
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     state.snowEffectEnabled = normalizeSnowEffectEnabled(state.snowEffectEnabled);
     window.__cedSnowEffect?.setEnabled?.(state.snowEffectEnabled);
+  }
+
+  function applySettingsPatch(patch) {
+    if (!patch || typeof patch !== 'object') return;
+
+    let formatChanged = false;
+    let fileNameChanged = false;
+    let formulaFormatChanged = false;
+    let dockChanged = false;
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.format)) {
+      const nextFormat = normalizeExportFormat(patch[STORAGE_KEYS.format]);
+      if (nextFormat !== state.selectedFormat) {
+        state.selectedFormat = nextFormat;
+        persist(STORAGE_KEYS.format, state.selectedFormat);
+        formatChanged = true;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.fileName)) {
+      const nextName = String(patch[STORAGE_KEYS.fileName] || '').trim();
+      if (nextName !== state.fileName) {
+        state.fileName = nextName;
+        persist(STORAGE_KEYS.fileName, state.fileName);
+        fileNameChanged = true;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.dock)) {
+      const nextDock = patch[STORAGE_KEYS.dock] === 'left' ? 'left' : 'right';
+      if (nextDock !== state.panelSide) {
+        state.panelSide = nextDock;
+        persist(STORAGE_KEYS.dock, state.panelSide);
+        dockChanged = true;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.formulaCopyFormat)) {
+      const nextFormulaFormat = normalizeFormulaCopyFormat(patch[STORAGE_KEYS.formulaCopyFormat]);
+      if (nextFormulaFormat !== state.formulaCopyFormat) {
+        state.formulaCopyFormat = nextFormulaFormat;
+        persist(STORAGE_KEYS.formulaCopyFormat, state.formulaCopyFormat);
+        formulaFormatChanged = true;
+        syncFormulaCopyFeatureConfig();
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.timelineEnabled)) {
+      state.timelineEnabled = normalizeTimelineEnabled(patch[STORAGE_KEYS.timelineEnabled]);
+      persist(STORAGE_KEYS.timelineEnabled, state.timelineEnabled);
+      syncTimelineFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.titleUpdaterEnabled)) {
+      state.titleUpdaterEnabled = normalizeTitleUpdaterEnabled(patch[STORAGE_KEYS.titleUpdaterEnabled]);
+      persist(STORAGE_KEYS.titleUpdaterEnabled, state.titleUpdaterEnabled);
+      syncTitleUpdaterFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.titleUpdaterIncludeFolder)) {
+      state.titleUpdaterIncludeFolder = normalizeTitleUpdaterIncludeFolder(patch[STORAGE_KEYS.titleUpdaterIncludeFolder]);
+      persist(STORAGE_KEYS.titleUpdaterIncludeFolder, state.titleUpdaterIncludeFolder);
+      syncTitleUpdaterFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.sidebarAutoHideEnabled)) {
+      state.sidebarAutoHideEnabled = normalizeSidebarAutoHideEnabled(patch[STORAGE_KEYS.sidebarAutoHideEnabled]);
+      persist(STORAGE_KEYS.sidebarAutoHideEnabled, state.sidebarAutoHideEnabled);
+      syncSidebarAutoHideFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.folderSpacing)) {
+      state.folderSpacing = normalizeFolderSpacing(patch[STORAGE_KEYS.folderSpacing]);
+      persist(STORAGE_KEYS.folderSpacing, state.folderSpacing);
+      syncFolderSpacingFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.markdownPatcherEnabled)) {
+      state.markdownPatcherEnabled = normalizeMarkdownPatcherEnabled(patch[STORAGE_KEYS.markdownPatcherEnabled]);
+      persist(STORAGE_KEYS.markdownPatcherEnabled, state.markdownPatcherEnabled);
+      syncMarkdownPatcherFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.snowEffectEnabled)) {
+      state.snowEffectEnabled = normalizeSnowEffectEnabled(patch[STORAGE_KEYS.snowEffectEnabled]);
+      persist(STORAGE_KEYS.snowEffectEnabled, state.snowEffectEnabled);
+      syncSnowEffectFeatureConfig();
+    }
+
+    if (dockChanged && state.panelEl) {
+      state.panelEl.classList.remove('ced-panel--left', 'ced-panel--right');
+      state.panelEl.classList.add(`ced-panel--${state.panelSide}`);
+    }
+    if (formatChanged) {
+      syncFormatButtonsUI();
+    }
+    if (fileNameChanged) {
+      syncFileNameInputUI();
+    }
+    if (formulaFormatChanged) {
+      syncFormulaFormatButtonsUI();
+    }
+  }
+
+  function syncFormatButtonsUI() {
+    if (!state.panelEl) return;
+    state.panelEl.querySelectorAll('.ced-format-button').forEach((button) => {
+      if (!(button instanceof HTMLElement)) return;
+      button.classList.toggle('ced-format-button--active', button.dataset.formatId === state.selectedFormat);
+    });
+  }
+
+  function syncFormulaFormatButtonsUI() {
+    if (!state.panelEl) return;
+    state.panelEl.querySelectorAll('.ced-option-button').forEach((button) => {
+      if (!(button instanceof HTMLElement)) return;
+      button.classList.toggle('ced-option-button--active', button.dataset.formulaFormatId === state.formulaCopyFormat);
+    });
+  }
+
+  function syncFileNameInputUI() {
+    if (!(state.nameInput instanceof HTMLInputElement)) return;
+    state.nameInput.value = state.fileName || '';
   }
 
   function annotateImages(node) {
@@ -1802,6 +1948,7 @@
   function observeConversation() {
     if (state.observer) state.observer.disconnect();
     state.observer = new MutationObserver(() => {
+      scheduleTimelineRefresh();
       clearTimeout(state.refreshTimer);
       state.refreshTimer = setTimeout(refreshConversationData, 800);
     });
@@ -2022,7 +2169,7 @@
 
         controls.forEach((control) => {
           if (!(control instanceof HTMLElement)) return;
-          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return;
           if (control.matches('[aria-expanded="true"]')) return;
           if (control instanceof HTMLButtonElement && control.disabled) return;
           if (isClaudeActionBarControl(control)) return;
@@ -2444,7 +2591,7 @@
     const addIfSafe = (node) => {
       if (!(node instanceof HTMLElement)) return;
       if (node === root) return;
-      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas')) {
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) {
         removable.add(node);
         return;
       }
@@ -2492,7 +2639,7 @@
     const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
     const clonedRoot = sourceRoot.cloneNode(true);
 
-    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-context-menu', '.ced-snow-effect-canvas'].forEach((selector) => {
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-export-quick', '.ced-timeline-context-menu', '.ced-snow-effect-canvas'].forEach((selector) => {
       clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
     });
     clonedRoot.querySelectorAll('.ced-formula-node').forEach((el) => {
@@ -2548,7 +2695,7 @@
 <base href="${escapeHtml(location.origin + '/')}">
 ${headClone.innerHTML}
 <style>
-  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas {
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas {
     display: none !important;
   }
   [data-testid*="composer"],
@@ -2849,7 +2996,7 @@ ${snapshotRoot.outerHTML}
         const hostScrollHeight = Math.ceil(host.scrollHeight || 0);
         const estimatedByTurns = Math.max(360, visualTurns.length * 140);
         renderHeightPx = Math.max(renderHeightPx, hostHeight, hostScrollHeight, estimatedByTurns);
-        console.warn('[Chat Exporter] Conversation height too small, using fallback render height:', renderHeightPx);
+        console.warn('[ChronoChat Studio] Conversation height too small, using fallback render height:', renderHeightPx);
       }
       const renderTarget = options?.target || 'default';
       const estimatedPixels = width * Math.max(renderHeightPx, 1);
@@ -2878,13 +3025,13 @@ ${snapshotRoot.outerHTML}
             try {
               stripUnsupportedColorFunctions(clonedDoc);
             } catch (error) {
-              console.warn('[Chat Exporter] stripUnsupportedColorFunctions failed', error);
+              console.warn('[ChronoChat Studio] stripUnsupportedColorFunctions failed', error);
             }
           },
           ignoreElements: (element) => element.classList.contains('ced-ignore')
         });
       } catch (html2canvasError) {
-        console.warn('[Chat Exporter] html2canvas failed, trying foreignObject fallback:', html2canvasError.message);
+        console.warn('[ChronoChat Studio] html2canvas failed, trying foreignObject fallback:', html2canvasError.message);
         canvas = await renderWithForeignObject(snapshotNode, width, renderHeightPx, scale, bgColor);
       }
 
@@ -3523,7 +3670,7 @@ ${snapshotRoot.outerHTML}
         if (style) img.setAttribute('style', style);
         dst.replaceWith(img);
       } catch (error) {
-        console.warn('[Chat Exporter] Canvas snapshot failed', error);
+        console.warn('[ChronoChat Studio] Canvas snapshot failed', error);
       }
     }
   }
@@ -3542,7 +3689,7 @@ ${snapshotRoot.outerHTML}
             style.removeProperty(name);
           }
         } catch (error) {
-          console.warn('[Chat Exporter] Failed to inspect style property', error);
+          console.warn('[ChronoChat Studio] Failed to inspect style property', error);
         }
       }
     };

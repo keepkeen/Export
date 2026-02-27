@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate polished gradient icons for the ChatGPT Conversation Exporter."""
+"""Generate polished gradient icons for ChronoChat Studio."""
 import math
 import pathlib
 import struct

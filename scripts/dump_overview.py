@@ -11,7 +11,7 @@ SKIP_PATH_PREFIXES = [
 ]
 SKIP_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
 
-PROJECT_DESCRIPTION = """ChatGPT Conversation Exporter 是一个面向 Chrome / Edge 的 MV3 扩展，提供漂浮式快捷按钮和可吸附侧边栏，帮助用户在 ChatGPT 网页端快速选择聊天轮次并导出多种格式（Text/Markdown/Word/HTML/JSON/Excel/CSV/PDF/Screenshot），并保留图片、附件、LaTeX 公式和自定义命名。"""
+PROJECT_DESCRIPTION = """ChronoChat Studio 是一个面向 Chrome / Edge 的 MV3 扩展，聚焦时间线导航与高保真导出，支持 ChatGPT / Gemini / Claude / Grok。用户可通过时间线快速定位对话、管理工作区能力，并导出 Text/Markdown/Word/HTML/JSON/Excel/CSV/PDF/Screenshot 等格式，保留图片、附件与 LaTeX 公式。"""
 
 ARCHITECTURE = """核心架构:
 1. manifest.json —— MV3 配置，声明权限、入口、content script、service worker 与图标。

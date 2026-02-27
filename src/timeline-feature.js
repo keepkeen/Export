@@ -9,6 +9,15 @@
     position: 'ced-timeline-position-v1',
   };
 
+  const SEARCH_DEBOUNCE_MS = 200;
+  const ACTIVE_CHANGE_INTERVAL_MS = 72;
+  const BASE_SCROLL_DURATION_MS = 520;
+  const DOT_MIN_GAP_PX = 18;
+  const DOT_MAX_GAP_PX = 38;
+  const DOT_EDGE_PADDING_PX = 10;
+  const DOT_NEAR_TOLERANCE_PX = 14;
+  const EXPORT_FILENAME_DEBOUNCE_MS = 220;
+
   const DEFAULT_OPTIONS = {
     enabled: true,
     markerRole: 'user',
@@ -16,8 +25,12 @@
     shortcutEnabled: true,
     draggable: true,
     previewEnabled: true,
+    exportQuickEnabled: true,
     scrollContainerSelectors: [],
     getTurns: null,
+    getExportConfig: null,
+    onExportConfigChange: null,
+    onExportNow: null,
   };
 
   function isElement(node) {
@@ -99,7 +112,6 @@
 
       this.ui = {
         bar: null,
-        dragHandle: null,
         track: null,
         dots: null,
         tooltip: null,
@@ -107,14 +119,28 @@
         previewPanel: null,
         previewSearch: null,
         previewList: null,
+        exportQuick: null,
+        exportFormat: null,
+        exportFileName: null,
+        exportNow: null,
         contextMenu: null,
       };
 
       this.locationHref = '';
       this.locationTimer = null;
       this.scrollRaf = null;
+      this.scrollAnimationRaf = null;
+      this.scrollAnimationToken = 0;
+      this.isProgrammaticScroll = false;
       this.tooltipTimer = null;
       this.metaPersistTimer = null;
+      this.previewSearchTimer = null;
+      this.activeChangeTimer = null;
+      this.pendingActiveIndex = -1;
+      this.lastActiveChangeAt = 0;
+      this.markerTops = [];
+      this.dotOffsets = [];
+      this.exportFileNameTimer = null;
 
       this.dragState = null;
 
@@ -124,15 +150,21 @@
       this.handleTrackContextMenu = this.handleTrackContextMenu.bind(this);
       this.handleScroll = this.handleScroll.bind(this);
       this.handleResize = this.handleResize.bind(this);
+      this.handleTimelineWheel = this.handleTimelineWheel.bind(this);
+      this.handlePreviewListWheel = this.handlePreviewListWheel.bind(this);
       this.handleDocumentClick = this.handleDocumentClick.bind(this);
       this.handleContextMenuClick = this.handleContextMenuClick.bind(this);
       this.handlePreviewToggleClick = this.handlePreviewToggleClick.bind(this);
       this.handlePreviewListClick = this.handlePreviewListClick.bind(this);
       this.handlePreviewSearchInput = this.handlePreviewSearchInput.bind(this);
       this.handleShortcutKeydown = this.handleShortcutKeydown.bind(this);
+      this.handleBarPointerDown = this.handleBarPointerDown.bind(this);
       this.handleDragStart = this.handleDragStart.bind(this);
       this.handleDragMove = this.handleDragMove.bind(this);
       this.handleDragEnd = this.handleDragEnd.bind(this);
+      this.handleExportFormatChange = this.handleExportFormatChange.bind(this);
+      this.handleExportFileNameInput = this.handleExportFileNameInput.bind(this);
+      this.handleExportNowClick = this.handleExportNowClick.bind(this);
     }
 
     initialize(options = {}) {
@@ -159,7 +191,17 @@
       this.detachEvents();
       this.bindScrollContainer(null);
       this.removeUi();
+      if (this.metaPersistTimer) {
+        clearTimeout(this.metaPersistTimer);
+        this.metaPersistTimer = null;
+      }
+      if (this.exportFileNameTimer) {
+        clearTimeout(this.exportFileNameTimer);
+        this.exportFileNameTimer = null;
+      }
       this.markers = [];
+      this.markerTops = [];
+      this.dotOffsets = [];
       this.markerMeta.clear();
       this.activeIndex = -1;
       this.initialized = false;
@@ -181,7 +223,9 @@
       this.bindScrollContainer(this.resolveScrollContainer());
       this.markers = this.collectMarkers();
       this.renderMarkers();
+      this.computeMarkerTops();
       this.renderPreviewList();
+      this.renderExportQuick();
       this.updateActiveDotFromViewport();
       this.updateFloatingPositions();
     }
@@ -237,7 +281,7 @@
         if (location.href === this.locationHref) return;
         this.locationHref = location.href;
         this.refresh();
-      }, 900);
+      }, 450);
     }
 
     stopLocationWatch() {
@@ -259,17 +303,9 @@
         this.ui.bar = bar;
       }
 
-      const existingDragHandle = this.ui.bar.querySelector('.ced-timeline-drag-handle');
-      if (existingDragHandle instanceof HTMLElement) {
-        this.ui.dragHandle = existingDragHandle;
-      } else {
-        const dragHandle = document.createElement('button');
-        dragHandle.type = 'button';
-        dragHandle.className = 'ced-timeline-drag-handle';
-        dragHandle.setAttribute('aria-label', 'Drag timeline');
-        dragHandle.innerHTML = '<span></span><span></span>';
-        this.ui.bar.appendChild(dragHandle);
-        this.ui.dragHandle = dragHandle;
+      const staleDragHandle = this.ui.bar.querySelector('.ced-timeline-drag-handle');
+      if (staleDragHandle instanceof HTMLElement) {
+        staleDragHandle.remove();
       }
 
       const existingTrack = this.ui.bar.querySelector('.ced-timeline-track');
@@ -336,6 +372,31 @@
       this.ui.previewSearch = this.ui.previewPanel.querySelector('.ced-timeline-preview-search');
       this.ui.previewList = this.ui.previewPanel.querySelector('.ced-timeline-preview-list');
 
+      const existingExportQuick = document.querySelector('.ced-timeline-export-quick');
+      if (existingExportQuick instanceof HTMLElement) {
+        this.ui.exportQuick = existingExportQuick;
+      } else {
+        const exportQuick = document.createElement('section');
+        exportQuick.className = 'ced-timeline-export-quick';
+        exportQuick.innerHTML = `
+          <div class="ced-timeline-export-quick__title">导出设置</div>
+          <label class="ced-timeline-export-quick__field">
+            <span>格式</span>
+            <select class="ced-timeline-export-format"></select>
+          </label>
+          <label class="ced-timeline-export-quick__field">
+            <span>文件名</span>
+            <input type="text" class="ced-timeline-export-filename" placeholder="自动使用会话标题">
+          </label>
+          <button type="button" class="ced-timeline-export-now">立即导出</button>
+        `;
+        document.body.appendChild(exportQuick);
+        this.ui.exportQuick = exportQuick;
+      }
+      this.ui.exportFormat = this.ui.exportQuick?.querySelector('.ced-timeline-export-format') || null;
+      this.ui.exportFileName = this.ui.exportQuick?.querySelector('.ced-timeline-export-filename') || null;
+      this.ui.exportNow = this.ui.exportQuick?.querySelector('.ced-timeline-export-now') || null;
+
       const existingContextMenu = document.querySelector('.ced-timeline-context-menu');
       if (existingContextMenu instanceof HTMLElement) {
         this.ui.contextMenu = existingContextMenu;
@@ -364,12 +425,14 @@
       if (this.ui.previewPanel?.parentNode) {
         this.ui.previewPanel.parentNode.removeChild(this.ui.previewPanel);
       }
+      if (this.ui.exportQuick?.parentNode) {
+        this.ui.exportQuick.parentNode.removeChild(this.ui.exportQuick);
+      }
       if (this.ui.contextMenu?.parentNode) {
         this.ui.contextMenu.parentNode.removeChild(this.ui.contextMenu);
       }
       this.ui = {
         bar: null,
-        dragHandle: null,
         track: null,
         dots: null,
         tooltip: null,
@@ -377,6 +440,10 @@
         previewPanel: null,
         previewSearch: null,
         previewList: null,
+        exportQuick: null,
+        exportFormat: null,
+        exportFileName: null,
+        exportNow: null,
         contextMenu: null,
       };
     }
@@ -388,11 +455,16 @@
       this.ui.track.addEventListener('mouseover', this.handleTrackOver);
       this.ui.track.addEventListener('mouseout', this.handleTrackOut);
       this.ui.track.addEventListener('contextmenu', this.handleTrackContextMenu);
+      this.ui.bar?.addEventListener('pointerdown', this.handleBarPointerDown);
+      this.ui.bar?.addEventListener('wheel', this.handleTimelineWheel, { passive: false });
       this.ui.previewToggle?.addEventListener('click', this.handlePreviewToggleClick);
       this.ui.previewList?.addEventListener('click', this.handlePreviewListClick);
+      this.ui.previewList?.addEventListener('wheel', this.handlePreviewListWheel, { passive: false });
       this.ui.previewSearch?.addEventListener('input', this.handlePreviewSearchInput);
       this.ui.contextMenu?.addEventListener('click', this.handleContextMenuClick);
-      this.ui.dragHandle?.addEventListener('pointerdown', this.handleDragStart);
+      this.ui.exportFormat?.addEventListener('change', this.handleExportFormatChange);
+      this.ui.exportFileName?.addEventListener('input', this.handleExportFileNameInput);
+      this.ui.exportNow?.addEventListener('click', this.handleExportNowClick);
 
       window.addEventListener('resize', this.handleResize, { passive: true });
       document.addEventListener('click', this.handleDocumentClick, true);
@@ -406,11 +478,16 @@
         this.ui.track.removeEventListener('mouseout', this.handleTrackOut);
         this.ui.track.removeEventListener('contextmenu', this.handleTrackContextMenu);
       }
+      this.ui.bar?.removeEventListener('pointerdown', this.handleBarPointerDown);
+      this.ui.bar?.removeEventListener('wheel', this.handleTimelineWheel);
       this.ui.previewToggle?.removeEventListener('click', this.handlePreviewToggleClick);
       this.ui.previewList?.removeEventListener('click', this.handlePreviewListClick);
+      this.ui.previewList?.removeEventListener('wheel', this.handlePreviewListWheel);
       this.ui.previewSearch?.removeEventListener('input', this.handlePreviewSearchInput);
       this.ui.contextMenu?.removeEventListener('click', this.handleContextMenuClick);
-      this.ui.dragHandle?.removeEventListener('pointerdown', this.handleDragStart);
+      this.ui.exportFormat?.removeEventListener('change', this.handleExportFormatChange);
+      this.ui.exportFileName?.removeEventListener('input', this.handleExportFileNameInput);
+      this.ui.exportNow?.removeEventListener('click', this.handleExportNowClick);
 
       window.removeEventListener('resize', this.handleResize);
       document.removeEventListener('click', this.handleDocumentClick, true);
@@ -421,6 +498,10 @@
       document.removeEventListener('pointercancel', this.handleDragEnd, true);
 
       this.cancelScrollRaf();
+      this.cancelScrollAnimation();
+      this.cancelPreviewSearchTimer();
+      this.cancelActiveChangeTimer();
+      this.cancelExportFileNameTimer();
       this.hideTooltip(true);
       this.hideContextMenu();
     }
@@ -445,6 +526,90 @@
       if (this.scrollContainer?.addEventListener) {
         this.scrollContainer.addEventListener('scroll', this.handleScroll, { passive: true });
       }
+      this.computeMarkerTops();
+    }
+
+    getContainerScrollTop() {
+      if (!this.scrollContainer) {
+        return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+      }
+      if (this.scrollContainer === document.body || this.scrollContainer === document.documentElement) {
+        return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+      }
+      return this.scrollContainer.scrollTop || 0;
+    }
+
+    setContainerScrollTop(value) {
+      const nextValue = Math.max(0, value);
+      if (!this.scrollContainer || this.scrollContainer === document.body || this.scrollContainer === document.documentElement) {
+        window.scrollTo({ top: nextValue, behavior: 'auto' });
+        return;
+      }
+      this.scrollContainer.scrollTop = nextValue;
+    }
+
+    getContainerClientHeight() {
+      if (!this.scrollContainer || this.scrollContainer === document.body || this.scrollContainer === document.documentElement) {
+        return window.innerHeight || document.documentElement.clientHeight || 0;
+      }
+      return this.scrollContainer.clientHeight || window.innerHeight;
+    }
+
+    getContainerScrollHeight() {
+      if (!this.scrollContainer || this.scrollContainer === document.body || this.scrollContainer === document.documentElement) {
+        return document.scrollingElement?.scrollHeight
+          || document.documentElement.scrollHeight
+          || document.body.scrollHeight
+          || 0;
+      }
+      return this.scrollContainer.scrollHeight || 0;
+    }
+
+    getMaxContainerScrollTop() {
+      return Math.max(0, this.getContainerScrollHeight() - this.getContainerClientHeight());
+    }
+
+    getContainerRect() {
+      if (!this.scrollContainer || this.scrollContainer === document.body || this.scrollContainer === document.documentElement) {
+        return {
+          top: 0,
+          left: 0,
+          right: window.innerWidth,
+          bottom: window.innerHeight,
+          width: window.innerWidth,
+          height: window.innerHeight,
+        };
+      }
+      return this.scrollContainer.getBoundingClientRect();
+    }
+
+    getElementOffsetTopInContainer(element) {
+      if (!(element instanceof HTMLElement)) return 0;
+      const containerRect = this.getContainerRect();
+      const rect = element.getBoundingClientRect();
+      return rect.top - containerRect.top + this.getContainerScrollTop();
+    }
+
+    computeMarkerTops() {
+      if (!this.markers.length) {
+        this.markerTops = [];
+        return;
+      }
+      this.markerTops = this.markers.map((marker) => this.getElementOffsetTopInContainer(marker.element));
+    }
+
+    upperBound(arr, value) {
+      let lo = 0;
+      let hi = arr.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (arr[mid] <= value) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      return lo - 1;
     }
 
     collectMarkers() {
@@ -497,7 +662,7 @@
 
       return nodes.map((node, index) => {
         const role = node.matches(userSelector) || node.querySelector(userSelector) ? 'user' : 'assistant';
-        const text = node.innerText || node.textContent || '';
+        const text = this.extractSummaryForNode(node);
         const id = node.getAttribute('data-testid') || `dom-${index}`;
         return {
           id: `${id}-${index}`,
@@ -528,17 +693,41 @@
       return out;
     }
 
+    extractSummaryForNode(node) {
+      if (!(node instanceof HTMLElement)) return '';
+      const cached = node.dataset.cedTimelineSummary;
+      if (cached) return cached;
+
+      const candidate = node.querySelector('.markdown p, .prose p, p, li, h1, h2, h3, h4, pre, code') || node;
+      const raw = candidate.textContent || node.textContent || '';
+      const summary = clipText(raw, 96);
+      if (summary) {
+        node.dataset.cedTimelineSummary = summary;
+      }
+      return summary;
+    }
+
     renderMarkers() {
-      if (!this.ui.dots) return;
+      if (!this.ui.dots || !this.ui.track) return;
       this.ui.dots.replaceChildren();
+      this.dotOffsets = [];
 
       if (!this.markers.length) {
         this.ui.bar?.classList.add('ced-timeline-bar--empty');
+        this.ui.dots.style.height = '100%';
         return;
       }
       this.ui.bar?.classList.remove('ced-timeline-bar--empty');
 
       const total = this.markers.length;
+      const trackHeight = Math.max(1, this.ui.track.clientHeight || 1);
+      const fitGap = total <= 1
+        ? trackHeight
+        : (trackHeight - (DOT_EDGE_PADDING_PX * 2) - 12) / Math.max(1, total - 1);
+      const gap = clamp(fitGap, DOT_MIN_GAP_PX, DOT_MAX_GAP_PX);
+      const contentHeight = Math.max(trackHeight, Math.round((DOT_EDGE_PADDING_PX * 2) + 12 + (Math.max(0, total - 1) * gap)));
+      this.ui.dots.style.height = `${contentHeight}px`;
+
       const frag = document.createDocumentFragment();
       this.markers.forEach((marker, index) => {
         const dot = document.createElement('button');
@@ -548,13 +737,17 @@
         dot.dataset.summary = marker.summary;
         dot.dataset.markerId = marker.id;
         dot.setAttribute('aria-label', marker.summary || `Turn ${index + 1}`);
-        const n = total <= 1 ? 0.5 : index / (total - 1);
-        dot.style.setProperty('--n', String(n));
+        const offset = total <= 1
+          ? Math.round(contentHeight / 2)
+          : Math.round(DOT_EDGE_PADDING_PX + 6 + (index * gap));
+        dot.style.top = `${offset}px`;
+        this.dotOffsets[index] = offset;
         marker.dot = dot;
         this.syncDotState(marker);
         frag.appendChild(dot);
       });
       this.ui.dots.appendChild(frag);
+      this.syncTrackScrollFromContainer();
     }
 
     renderPreviewList() {
@@ -603,16 +796,82 @@
         this.syncDotState(marker);
       });
       this.highlightPreviewActiveItem();
+      this.ensureTrackVisible(nextIndex);
+    }
+
+    scheduleActiveIndex(nextIndex) {
+      if (nextIndex < 0 || nextIndex >= this.markers.length) return;
+      if (nextIndex === this.activeIndex) return;
+
+      const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? performance.now()
+        : Date.now();
+      const elapsed = now - this.lastActiveChangeAt;
+
+      if (elapsed < ACTIVE_CHANGE_INTERVAL_MS) {
+        this.pendingActiveIndex = nextIndex;
+        if (!this.activeChangeTimer) {
+          const wait = Math.max(0, ACTIVE_CHANGE_INTERVAL_MS - elapsed);
+          this.activeChangeTimer = setTimeout(() => {
+            this.activeChangeTimer = null;
+            if (this.pendingActiveIndex >= 0 && this.pendingActiveIndex !== this.activeIndex) {
+              this.setActiveIndex(this.pendingActiveIndex);
+              this.lastActiveChangeAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+                ? performance.now()
+                : Date.now();
+            }
+            this.pendingActiveIndex = -1;
+          }, wait);
+        }
+        return;
+      }
+
+      this.setActiveIndex(nextIndex);
+      this.lastActiveChangeAt = now;
     }
 
     highlightPreviewActiveItem() {
       if (!this.ui.previewList) return;
       const items = this.ui.previewList.querySelectorAll('.ced-timeline-preview-item');
+      let activeItem = null;
       items.forEach((item) => {
         if (!(item instanceof HTMLElement)) return;
         const index = Number(item.dataset.markerIndex || '-1');
-        item.classList.toggle('active', index === this.activeIndex);
+        const active = index === this.activeIndex;
+        item.classList.toggle('active', active);
+        if (active) activeItem = item;
       });
+      if (this.previewOpen && activeItem instanceof HTMLElement) {
+        activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }
+
+    syncTrackScrollFromContainer() {
+      if (!this.ui.track) return;
+      const maxTrackScroll = Math.max(0, this.ui.track.scrollHeight - this.ui.track.clientHeight);
+      if (maxTrackScroll <= 1) {
+        this.ui.track.scrollTop = 0;
+        return;
+      }
+      const maxContainerScroll = this.getMaxContainerScrollTop();
+      if (maxContainerScroll <= 1) {
+        this.ui.track.scrollTop = 0;
+        return;
+      }
+      const ratio = clamp(this.getContainerScrollTop() / maxContainerScroll, 0, 1);
+      this.ui.track.scrollTop = ratio * maxTrackScroll;
+    }
+
+    ensureTrackVisible(index) {
+      if (!this.ui.track) return;
+      const marker = this.markers[index];
+      const dot = marker?.dot;
+      if (!(dot instanceof HTMLElement)) return;
+
+      const target = dot.offsetTop - (this.ui.track.clientHeight * 0.5);
+      const maxTrackScroll = Math.max(0, this.ui.track.scrollHeight - this.ui.track.clientHeight);
+      if (maxTrackScroll <= 0) return;
+      this.ui.track.scrollTop = clamp(target, 0, maxTrackScroll);
     }
 
     updateActiveDotFromViewport() {
@@ -621,27 +880,51 @@
         this.highlightPreviewActiveItem();
         return;
       }
+      this.syncTrackScrollFromContainer();
+      if (this.isProgrammaticScroll) return;
 
-      const anchorY = Math.max(120, Math.round(window.innerHeight * 0.32));
+      const scrollTop = this.getContainerScrollTop();
+      const reference = scrollTop + this.getContainerClientHeight() * 0.45;
       let active = 0;
-      for (let i = 0; i < this.markers.length; i++) {
-        const marker = this.markers[i];
-        if (!marker?.element) continue;
-        const rect = marker.element.getBoundingClientRect();
-        if (rect.top <= anchorY) {
-          active = i;
-        } else {
-          break;
+      if (this.markerTops.length === this.markers.length && this.markerTops.length) {
+        active = clamp(this.upperBound(this.markerTops, reference), 0, this.markers.length - 1);
+      } else {
+        const containerRect = this.getContainerRect();
+        for (let i = 0; i < this.markers.length; i++) {
+          const marker = this.markers[i];
+          if (!marker?.element) continue;
+          const top = marker.element.getBoundingClientRect().top - containerRect.top + scrollTop;
+          if (top <= reference) {
+            active = i;
+          } else {
+            break;
+          }
         }
       }
-      this.setActiveIndex(active);
+      this.scheduleActiveIndex(active);
     }
 
     scrollToMarker(index) {
-      const marker = this.markers[index];
+      let marker = this.markers[index];
+      if (!marker?.element?.isConnected) {
+        this.refresh();
+        marker = this.markers[index] || this.markers.find((item) => item.id === marker?.id);
+      }
       if (!marker?.element) return;
-      marker.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      this.setActiveIndex(index);
+      const viewportOffset = Math.round(this.getContainerClientHeight() * 0.18);
+      const targetTop = Math.max(0, this.getElementOffsetTopInContainer(marker.element) - viewportOffset);
+      const startTop = this.getContainerScrollTop();
+      const distance = Math.abs(targetTop - startTop);
+      const span = Math.max(1, this.getContainerClientHeight());
+      const scale = Math.max(0.6, Math.min(1.7, distance / span));
+      const duration = Math.round(clamp(BASE_SCROLL_DURATION_MS * scale, 260, 920));
+      this.smoothScrollTo(targetTop, duration, () => {
+        const currentTop = this.getContainerScrollTop();
+        if (Math.abs(currentTop - targetTop) > 12) {
+          marker.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        this.scheduleActiveIndex(index);
+      });
     }
 
     navigateByOffset(offset) {
@@ -649,6 +932,44 @@
       const start = this.activeIndex >= 0 ? this.activeIndex : 0;
       const next = clamp(start + offset, 0, this.markers.length - 1);
       this.scrollToMarker(next);
+    }
+
+    smoothScrollTo(targetTop, duration, done) {
+      this.cancelScrollAnimation();
+
+      const startTop = this.getContainerScrollTop();
+      const distance = targetTop - startTop;
+      if (Math.abs(distance) < 1) {
+        this.setContainerScrollTop(targetTop);
+        done?.();
+        return;
+      }
+
+      this.isProgrammaticScroll = true;
+      const token = ++this.scrollAnimationToken;
+      let startTime = null;
+
+      const step = (timestamp) => {
+        if (token !== this.scrollAnimationToken) return;
+        if (startTime === null) startTime = timestamp;
+        const progress = Math.min(1, (timestamp - startTime) / Math.max(1, duration));
+        const eased = progress < 0.5
+          ? 4 * progress * progress * progress
+          : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+        this.setContainerScrollTop(startTop + distance * eased);
+        this.handleScroll();
+        if (progress < 1) {
+          this.scrollAnimationRaf = requestAnimationFrame(step);
+          return;
+        }
+        this.scrollAnimationRaf = null;
+        this.setContainerScrollTop(targetTop);
+        this.isProgrammaticScroll = false;
+        this.computeMarkerTops();
+        done?.();
+      };
+
+      this.scrollAnimationRaf = requestAnimationFrame(step);
     }
 
     handleTrackClick(event) {
@@ -800,10 +1121,44 @@
       this.scrollRaf = null;
     }
 
+    cancelScrollAnimation() {
+      if (this.scrollAnimationRaf) {
+        cancelAnimationFrame(this.scrollAnimationRaf);
+        this.scrollAnimationRaf = null;
+      }
+      this.scrollAnimationToken += 1;
+      this.isProgrammaticScroll = false;
+    }
+
+    cancelPreviewSearchTimer() {
+      if (this.previewSearchTimer) {
+        clearTimeout(this.previewSearchTimer);
+        this.previewSearchTimer = null;
+      }
+    }
+
+    cancelExportFileNameTimer() {
+      if (this.exportFileNameTimer) {
+        clearTimeout(this.exportFileNameTimer);
+        this.exportFileNameTimer = null;
+      }
+    }
+
+    cancelActiveChangeTimer() {
+      if (this.activeChangeTimer) {
+        clearTimeout(this.activeChangeTimer);
+        this.activeChangeTimer = null;
+      }
+      this.pendingActiveIndex = -1;
+    }
+
     handleResize() {
       this.hideTooltip(true);
+      this.renderMarkers();
+      this.computeMarkerTops();
       this.updateActiveDotFromViewport();
       this.applyStoredPosition();
+      this.renderExportQuick();
       this.updateFloatingPositions();
     }
 
@@ -863,6 +1218,7 @@
       }
       if (target.closest('.ced-timeline-context-menu')) return;
       if (target.closest('.ced-timeline-dot')) return;
+      if (target.closest('.ced-timeline-export-quick')) return;
       this.hideContextMenu();
     }
 
@@ -872,13 +1228,19 @@
       this.previewOpen = !this.previewOpen;
       this.applyPreviewState();
       this.renderPreviewList();
+      this.updateFloatingPositions();
     }
 
     handlePreviewSearchInput(event) {
       const input = event.target;
       if (!(input instanceof HTMLInputElement)) return;
-      this.previewSearchTerm = input.value || '';
-      this.renderPreviewList();
+      const nextValue = input.value || '';
+      this.cancelPreviewSearchTimer();
+      this.previewSearchTimer = setTimeout(() => {
+        this.previewSearchTimer = null;
+        this.previewSearchTerm = nextValue;
+        this.renderPreviewList();
+      }, SEARCH_DEBOUNCE_MS);
     }
 
     handlePreviewListClick(event) {
@@ -905,6 +1267,49 @@
       }
     }
 
+    handleTimelineWheel(event) {
+      if (!this.enabled || !this.scrollContainer) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const delta = Number(event.deltaY || 0);
+      this.setContainerScrollTop(this.getContainerScrollTop() + delta);
+      this.handleScroll();
+    }
+
+    handlePreviewListWheel(event) {
+      const list = this.ui.previewList;
+      if (!list) return;
+      event.stopPropagation();
+      const atTop = list.scrollTop <= 0 && event.deltaY < 0;
+      const atBottom = (list.scrollTop + list.clientHeight >= list.scrollHeight - 1) && event.deltaY > 0;
+      if (atTop || atBottom) {
+        event.preventDefault();
+      }
+    }
+
+    isPointerNearDot(clientY) {
+      if (!this.ui.track || !this.dotOffsets.length) return false;
+      const rect = this.ui.track.getBoundingClientRect();
+      if (clientY < rect.top || clientY > rect.bottom) return false;
+      const offsetY = clientY - rect.top + this.ui.track.scrollTop;
+      const pivot = this.upperBound(this.dotOffsets, offsetY);
+      const candidates = [pivot - 1, pivot, pivot + 1];
+      return candidates.some((index) => {
+        if (index < 0 || index >= this.dotOffsets.length) return false;
+        return Math.abs(this.dotOffsets[index] - offsetY) <= DOT_NEAR_TOLERANCE_PX;
+      });
+    }
+
+    handleBarPointerDown(event) {
+      if (!this.enabled || this.options.draggable === false) return;
+      if (event.button !== 0) return;
+      if (!(event.target instanceof HTMLElement)) return;
+      if (event.target.closest('.ced-timeline-dot')) return;
+      if (event.target.closest('.ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-export-quick, .ced-timeline-context-menu')) return;
+      if (this.isPointerNearDot(event.clientY)) return;
+      this.handleDragStart(event);
+    }
+
     handleDragStart(event) {
       if (!this.enabled || this.options.draggable === false) return;
       if (!(event.target instanceof HTMLElement)) return;
@@ -920,6 +1325,7 @@
         startLeft: rect.left,
         startTop: rect.top,
       };
+      this.ui.bar?.classList.add('ced-timeline-bar--dragging');
 
       document.addEventListener('pointermove', this.handleDragMove, true);
       document.addEventListener('pointerup', this.handleDragEnd, true);
@@ -942,11 +1348,40 @@
     handleDragEnd(_event) {
       if (!this.dragState) return;
       this.dragState = null;
+      this.ui.bar?.classList.remove('ced-timeline-bar--dragging');
       document.removeEventListener('pointermove', this.handleDragMove, true);
       document.removeEventListener('pointerup', this.handleDragEnd, true);
       document.removeEventListener('pointercancel', this.handleDragEnd, true);
 
       this.persistCurrentPosition();
+    }
+
+    handleExportFormatChange(event) {
+      const select = event.target;
+      if (!(select instanceof HTMLSelectElement)) return;
+      if (typeof this.options.onExportConfigChange === 'function') {
+        this.options.onExportConfigChange({ format: select.value || 'text' });
+      }
+    }
+
+    handleExportFileNameInput(event) {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement)) return;
+      this.cancelExportFileNameTimer();
+      this.exportFileNameTimer = setTimeout(() => {
+        this.exportFileNameTimer = null;
+        if (typeof this.options.onExportConfigChange === 'function') {
+          this.options.onExportConfigChange({ fileName: input.value || '' });
+        }
+      }, EXPORT_FILENAME_DEBOUNCE_MS);
+    }
+
+    handleExportNowClick(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof this.options.onExportNow === 'function') {
+        this.options.onExportNow();
+      }
     }
 
     applyAbsolutePosition(left, top) {
@@ -956,6 +1391,7 @@
       const nextLeft = clamp(left, 8, window.innerWidth - width - 8);
       const nextTop = clamp(top, 8, window.innerHeight - height - 8);
       this.ui.bar.classList.add('ced-timeline-bar--custom');
+      this.ui.bar.style.right = 'auto';
       this.ui.bar.style.left = `${Math.round(nextLeft)}px`;
       this.ui.bar.style.top = `${Math.round(nextTop)}px`;
       this.ui.bar.style.transform = 'none';
@@ -965,7 +1401,10 @@
       if (!this.ui.bar) return;
       if (!this.position) {
         this.ui.bar.classList.remove('ced-timeline-bar--custom');
-        this.ui.bar.style.left = '12px';
+        const width = this.ui.bar.offsetWidth || 24;
+        const rightAlignedLeft = Math.max(8, window.innerWidth - width - 12);
+        this.ui.bar.style.right = 'auto';
+        this.ui.bar.style.left = `${Math.round(rightAlignedLeft)}px`;
         this.ui.bar.style.top = '50%';
         this.ui.bar.style.transform = 'translateY(-50%)';
         return;
@@ -992,9 +1431,66 @@
       const shouldOpen = this.enabled && this.options.previewEnabled !== false && this.previewOpen;
       this.ui.previewPanel.classList.toggle('ced-timeline-preview-panel--visible', shouldOpen);
       this.ui.previewToggle.classList.toggle('active', shouldOpen);
+      const showExportQuick = shouldOpen && this.options.exportQuickEnabled !== false;
+      this.ui.exportQuick?.classList.toggle('ced-timeline-export-quick--visible', showExportQuick);
       if (!shouldOpen) {
         this.hideContextMenu();
+      } else {
+        this.renderExportQuick();
       }
+    }
+
+    getExportConfig() {
+      const fallback = {
+        formats: [{ id: 'text', label: 'Text' }],
+        selectedFormat: 'text',
+        fileName: '',
+      };
+      if (typeof this.options.getExportConfig !== 'function') {
+        return fallback;
+      }
+      try {
+        const raw = this.options.getExportConfig();
+        if (!raw || typeof raw !== 'object') return fallback;
+        const formats = Array.isArray(raw.formats) && raw.formats.length
+          ? raw.formats
+            .map((item) => ({
+              id: String(item?.id || ''),
+              label: String(item?.label || item?.id || ''),
+            }))
+            .filter((item) => item.id)
+          : fallback.formats;
+        const selectedFormat = String(raw.selectedFormat || formats[0]?.id || 'text');
+        const fileName = String(raw.fileName || '');
+        return {
+          formats: formats.length ? formats : fallback.formats,
+          selectedFormat,
+          fileName,
+        };
+      } catch (_error) {
+        return fallback;
+      }
+    }
+
+    renderExportQuick() {
+      if (!this.ui.exportQuick || !this.ui.exportFormat || !this.ui.exportFileName) return;
+      const config = this.getExportConfig();
+      const optionsHtml = config.formats
+        .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label || item.id)}</option>`)
+        .join('');
+      if (this.ui.exportFormat.innerHTML !== optionsHtml) {
+        this.ui.exportFormat.innerHTML = optionsHtml;
+      }
+      this.ui.exportFormat.value = config.formats.some((item) => item.id === config.selectedFormat)
+        ? config.selectedFormat
+        : config.formats[0]?.id || 'text';
+      if (document.activeElement !== this.ui.exportFileName) {
+        this.ui.exportFileName.value = config.fileName;
+      }
+      const disabled = !this.enabled;
+      this.ui.exportFormat.disabled = disabled;
+      this.ui.exportFileName.disabled = disabled;
+      if (this.ui.exportNow) this.ui.exportNow.disabled = disabled;
     }
 
     updateFloatingPositions() {
@@ -1022,6 +1518,21 @@
         this.ui.previewPanel.style.left = `${Math.round(left)}px`;
         this.ui.previewPanel.style.top = `${Math.round(top)}px`;
       }
+
+      if (this.ui.exportQuick) {
+        const quickWidth = this.ui.exportQuick.offsetWidth || 280;
+        const quickHeight = this.ui.exportQuick.offsetHeight || 144;
+        const panelRect = this.ui.previewPanel?.getBoundingClientRect();
+        let left = panelRect?.left ?? (barRect.right + 46);
+        if (left + quickWidth > window.innerWidth - 8) {
+          left = Math.max(8, (panelRect?.right || barRect.left) - quickWidth);
+        }
+        left = clamp(left, 8, window.innerWidth - quickWidth - 8);
+        const anchorTop = panelRect ? panelRect.bottom + 8 : barRect.bottom + 8;
+        const top = clamp(anchorTop, 8, window.innerHeight - quickHeight - 8);
+        this.ui.exportQuick.style.left = `${Math.round(left)}px`;
+        this.ui.exportQuick.style.top = `${Math.round(top)}px`;
+      }
     }
 
     applyEnabledState() {
@@ -1029,6 +1540,7 @@
       const hidden = !this.enabled;
       this.ui.bar.classList.toggle('ced-timeline-bar--hidden', hidden);
       this.ui.previewToggle?.classList.toggle('ced-timeline-preview-toggle--hidden', hidden);
+      this.ui.exportQuick?.classList.toggle('ced-timeline-export-quick--hidden', hidden);
       if (hidden) {
         this.hideTooltip(true);
         this.hideContextMenu();

@@ -225,3 +225,185 @@
   - `node --check src/snow-effect-feature.js`
   - `node --check src/service-worker.js`
   - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 6 Goal
+- 面板 UI 与 `gemini-voyager` 风格统一（颜色、层次、交互节奏）。
+- 将导出能力作为主路径，与已迁移功能在同一面板中优雅融合（避免信息堆叠）。
+
+## Iteration 6 Plan
+- [x] 重构面板信息架构：引入 `导出` / `工作区` 双分区（tab）并持久化当前视图。
+- [x] 调整 `content-script` 面板装配：导出主流程优先，增强功能集中到工作区分组。
+- [x] 重写核心样式令牌与面板组件样式，贴近 `gemini-voyager` 的清爽卡片风格与主题适配。
+- [x] 保持现有 Timeline / Folder / Prompt Vault / Formula 等功能交互不回退。
+- [x] 完成语法检查与重新打包，并补充本迭代 review 记录。
+
+## Iteration 6 Acceptance
+- [x] 面板视觉风格与 Gemini Voyager 统一，浅色/深色主题下都可读。
+- [x] 导出入口在首屏清晰可见，导出操作链路更短，不与增强配置混杂。
+- [x] 工作区功能可独立配置，现有能力均可正常使用。
+- [x] 打包产物可生成且无语法错误。
+
+## Iteration 6 Review
+- 装配改动：
+  - `src/content-script.js` 新增 `ced-panel-tab` 存储键与 `PANEL_TABS`，支持 `导出/工作区` 双分区切换和持久化。
+  - `attachPanel()` 重排为 tab 架构：导出链路（格式/文件名/轮次/导出按钮）集中在导出分区；公式、时间轴、Folder、Prompt Vault、Title Updater 与其他增强项收敛到工作区分区。
+- 样式改动：
+  - `src/styles.css` 重写核心设计令牌与面板组件，采用 Gemini Voyager 风格的浅色卡片体系，并补齐深色主题变量覆盖。
+  - 新增 tab 交互样式（`ced-panel__tabs` / `ced-panel__tab` / `ced-panel__tab-panel`），统一 Folder/Prompt/Timeline/Formula 视觉语言。
+- 文档改动：
+  - `README.md` Highlights 增加“导出/工作区双分区 UI”说明。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/formula-copy-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/folder-feature.js`
+  - `node --check src/prompt-vault-feature.js`
+  - `node --check src/title-updater-feature.js`
+  - `node --check src/sidebar-autohide-feature.js`
+  - `node --check src/folder-spacing-feature.js`
+  - `node --check src/markdown-patcher-feature.js`
+  - `node --check src/snow-effect-feature.js`
+  - `node --check src/service-worker.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 7 Goal
+- 移除页面悬浮按钮，将设置迁移到浏览器顶部扩展图标的 popup。
+- 优化时间轴交互与响应速度，对齐 `gemini-voyager` 的核心体验（滚轮、主动高亮计算、搜索防抖、平滑跳转）。
+
+## Iteration 7 Plan
+- [x] 新增扩展 `popup`（UI + JS）：承接原悬浮标设置项并支持“打开导出面板/立即导出”。
+- [x] 更新 `manifest` 接入 popup，保留快捷键/右键菜单导出入口。
+- [x] 调整 `content-script`：不再注入悬浮按钮，支持 popup 下发设置 patch 并实时生效。
+- [x] 重构 `timeline-feature` 交互：滚轮驱动主滚动、活动点二分计算、防抖搜索、平滑滚动导航、滚动更新节流。
+- [x] 完成语法检查 + 重新打包，并更新 README / todo / lessons。
+
+## Iteration 7 Acceptance
+- [x] 页面不再显示扩展悬浮按钮。
+- [x] 设置可在扩展图标 popup 中完成，并能实时作用于当前页面。
+- [x] 时间轴交互明显更顺滑、响应更快，滚轮与预览搜索体验改善。
+- [x] 打包产物生成成功且语法检查通过。
+
+## Iteration 7 Review
+- 新增 popup：
+  - `src/popup.html` / `src/popup.css` / `src/popup.js`
+  - 支持动作：打开导出面板、立即导出。
+  - 支持设置：格式、文件名、停靠侧、公式复制格式、timeline/title/folder/sidebar/markdown/snow 等并持久化到 `chrome.storage.sync`。
+- 装配改动：
+  - `manifest.json` 增加 `action.default_popup: src/popup.html`。
+  - `src/content-script.js` 停止注入悬浮按钮并删除相关拖拽/守护逻辑；新增 `CED_APPLY_SETTINGS_PATCH` 消息，popup 改动可实时同步到当前页面并触发对应 feature config 更新。
+  - `togglePanel` 改为无悬浮按钮依赖，支持通过 popup / 快捷键 / 右键菜单控制。
+  - 面板 `工作区` 分区仅保留 Folder / Prompt Vault 等管理能力；设置类项统一迁移到 popup。
+- Timeline 优化：
+  - `src/timeline-feature.js` 新增时间轴滚轮驱动主滚动。
+  - 活动标记改为基于 `markerTops` 的二分计算 + 高频变更节流，降低滚动时抖动和延迟。
+  - 轮次跳转改为自定义平滑滚动（基于距离动态时长），响应更快。
+  - 预览面板搜索加入 200ms 防抖；列表滚轮隔离，避免把滚动透传给主页面。
+- 文档：
+  - `README.md` 更新为 popup 驱动入口说明，补充 popup 文件说明。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/service-worker.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 8 Goal
+- 修复并增强时间线交互：默认右侧、非圆点区域可拖拽、点击圆点稳定跳转、长对话自适应尺度。
+- 显著提升时间线加载速度，避免等待完整导出解析。
+- 雪花动效默认开启。
+- 导出设置迁移到时间线预览区域下方；顶部 popup 仅保留时间线与其他功能设置。
+
+## Iteration 8 Plan
+- [x] 将时间线默认位置改为右侧，并实现整条时间线（排除圆点）拖拽与手型光标。
+- [x] 重构时间线点位布局：长对话启用自适应间距/滚动轨道，避免圆点拥挤。
+- [x] 修复圆点跳转：增强目标定位与滚动容器兼容，处理失效节点回退。
+- [x] 优化时间线数据源：接入轻量 turns 采集，避免依赖导出全量解析。
+- [x] 迁移导出设置到时间线预览面板下方（格式/文件名/导出按钮），并补充导出隔离选择器。
+- [x] 精简 popup：移除导出相关入口，仅保留时间线及其他设置项。
+- [x] 调整默认值：雪花动效默认开启（content + popup）。
+- [x] 完成语法检查与重新打包，记录 review。
+
+## Iteration 8 Acceptance
+- [x] 时间线默认出现在右侧，且非圆点区域可直接拖动位置。
+- [x] 长对话下圆点间距自动调节并可滚动跟随，不再堆叠成团。
+- [x] 点击时间线圆点可稳定跳转到对应对话位置。
+- [x] 时间线在页面变更时更快出现，不再依赖完整导出解析结束。
+- [x] 雪花动效默认开启。
+- [x] 导出设置可在时间线预览面板下方直接选择；popup 仅保留时间线与其他设置。
+
+## Iteration 8 Review
+- 时间线交互与性能：
+  - `src/timeline-feature.js` 改为默认右侧定位，支持整条时间线拖拽（排除圆点附近），拖拽中显示 `grabbing`。
+  - 圆点布局改为像素间距模型：根据轨道高度自动计算 gap，长会话自动扩展 dots 容器并同步轨道滚动比例。
+  - 点击圆点跳转增强：失效节点自动刷新重试，滚动目标加入视口偏移并在必要时 `scrollIntoView` 回退。
+  - 新增预览下方导出快捷面板（格式/文件名/立即导出），通过回调与 content-script 状态同步。
+- 装配与默认值：
+  - `src/content-script.js` 时间线改用轻量 `collectTimelineTurnsFast` 数据源，MutationObserver 增加 `scheduleTimelineRefresh` 快速刷新路径。
+  - 雪花默认值改为开启：`state.snowEffectEnabled` 与 popup `DEFAULTS` 均为 `true`。
+  - 导出隔离链路新增 `.ced-timeline-export-quick`，确保不污染导出结果。
+- Popup 调整：
+  - `src/popup.html` / `src/popup.js` / `src/popup.css` 移除导出相关入口，仅保留时间线与其他增强设置。
+- 样式改动：
+  - `src/styles.css` 时间线默认右侧；移除旧拖拽把手样式；新增导出快捷面板样式与响应式隐藏规则。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/service-worker.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 9 Goal
+- 调整公式交互：鼠标悬停仅显示公式背景，不显示复制按钮。
+- 修复背景覆盖不足：上下边缘完整包裹公式。
+- 独立公式点击即复制，并在旁侧显示提示；背景不覆盖左右留白区域。
+
+## Iteration 9 Plan
+- [x] 重构 `formula-copy-feature`：去除按钮注入与按钮事件，改为点击 `.ced-formula-node` 直接复制。
+- [x] 调整独立公式节点绑定策略：显示公式绑定到 `.katex-display > .katex`，避免整行左右空白被高亮。
+- [x] 调整公式样式：增强上下边缘覆盖、保留旁侧 toast、隐藏旧按钮样式。
+- [x] 完成语法检查与重新打包。
+
+## Iteration 9 Acceptance
+- [x] 悬停公式只显示背景标识，不再出现“复制 LaTeX”按钮。
+- [x] 背景在上下方向完整覆盖公式，不再露出边缘。
+- [x] 对于单独一栏公式，背景仅覆盖公式本体，点击公式即可复制并弹出提示。
+
+## Iteration 9 Review
+- 代码改动：
+  - `src/formula-copy-feature.js`
+    - 删除复制按钮注入逻辑，点击公式节点直接复制。
+    - 显示公式改为绑定到内部 `.katex` 节点，避免整行空白区域高亮。
+  - `src/styles.css`
+    - 公式高亮样式改为 `inline-flex + padding/margin`，增强上下包裹。
+    - 保留 toast 样式，复制按钮样式改为强制隐藏。
+- 验证：
+  - `node --check src/formula-copy-feature.js`
+  - `node --check src/content-script.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 10 Goal
+- 将产品统一更名为 `ChronoChat Studio`。
+- 重写 `README`，形成正式 GitHub 项目说明（定位、能力、使用、构建、文件结构）。
+- 将当前代码同步推送到远端仓库 `https://github.com/keepkeen/Export.git`。
+
+## Iteration 10 Plan
+- [x] 全局替换产品名称：`manifest`、popup 标题、面板标题、日志前缀、脚本产物命名。
+- [x] 重写 `README.md`，覆盖当前功能现状（时间线、公式复制、工作区、导出与打包）。
+- [x] 运行语法检查与打包验证，确认重命名后流程可用。
+- [ ] 提交并推送到 GitHub `origin/main`。
+
+## Iteration 10 Acceptance
+- [x] 扩展名称、popup、面板展示文案统一为 `ChronoChat Studio`。
+- [x] README 为完整项目文档，内容与当前实现一致。
+- [x] 打包脚本输出文件名切换为 `chronochat-studio.zip/.crx`。
+- [ ] 远端仓库已包含本次最新提交。

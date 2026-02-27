@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 UNPACKED="$DIST/unpacked"
-ZIP_PATH="$DIST/chatgpt-conversation-exporter.zip"
-CRX_PATH="$DIST/chatgpt-conversation-exporter.crx"
+ZIP_PATH="$DIST/chronochat-studio.zip"
+CRX_PATH="$DIST/chronochat-studio.crx"
 PROFILE_DIR="$DIST/.chrome-profile"
-DEFAULT_KEY="$ROOT/certs/chatgpt-exporter.pem"
+DEFAULT_KEY="$ROOT/certs/chronochat-studio.pem"
 KEY_PATH="${KEY_PATH:-$DEFAULT_KEY}"
 
 rm -rf "$UNPACKED" "$ZIP_PATH" "$CRX_PATH" "$PROFILE_DIR"
@@ -57,7 +57,7 @@ if [[ -z "$BROWSER_BIN" ]]; then
 ⚠️  未找到可用于打包 CRX 的 Chrome/Edge 可执行文件。
 请安装 Chromium 内核浏览器，并设置环境变量 CHROME_BIN 指向其可执行文件，
 或者手动运行：
-  /path/to/chrome --pack-extension=dist/unpacked --pack-extension-key=certs/chatgpt-exporter.pem
+  /path/to/chrome --pack-extension=dist/unpacked --pack-extension-key=certs/chronochat-studio.pem
 MSG
   exit 0
 fi

@@ -136,7 +136,6 @@
       this.toastEl = null;
 
       this.handleClick = this.handleClick.bind(this);
-      this.handleKeydown = this.handleKeydown.bind(this);
       this.handleMutations = this.handleMutations.bind(this);
     }
 
@@ -154,7 +153,6 @@
       }
 
       document.addEventListener('click', this.handleClick, true);
-      document.addEventListener('keydown', this.handleKeydown, true);
       this.refresh(document);
       this.observeMutations();
       this.initialized = true;
@@ -163,7 +161,6 @@
     destroy() {
       if (!this.initialized) return;
       document.removeEventListener('click', this.handleClick, true);
-      document.removeEventListener('keydown', this.handleKeydown, true);
       if (this.mutationObserver) {
         this.mutationObserver.disconnect();
         this.mutationObserver = null;
@@ -178,7 +175,6 @@
     setFormat(format) {
       if (format !== 'latex' && format !== 'mathml' && format !== 'no-dollar') return;
       this.format = format;
-      this.updateCopyButtonLabels();
     }
 
     refresh(root = document) {
@@ -232,46 +228,35 @@
         if (!(formulaRoot instanceof HTMLElement)) return;
         if (formulaRoot.closest('.ced-panel')) return;
 
+        formulaRoot.querySelectorAll('.ced-formula-copy-btn').forEach((button) => button.remove());
         const latex = this.extractLatexFromKatexNode(formulaRoot);
         if (!latex) return;
 
-        formulaRoot.classList.add('ced-formula-node');
-        formulaRoot.dataset.cedFormulaLatex = latex;
-        formulaRoot.dataset.cedFormulaDisplay = this.isDisplayMode(formulaRoot) ? '1' : '0';
+        const isDisplay = this.isDisplayMode(formulaRoot);
+        const interactiveNode = this.resolveInteractiveNode(formulaRoot, isDisplay);
+        if (!(interactiveNode instanceof HTMLElement)) return;
 
-        const button = this.ensureCopyButton(formulaRoot);
-        if (!button) return;
-        button.textContent = this.getCopyButtonLabel();
+        interactiveNode.classList.add('ced-formula-node');
+        interactiveNode.classList.toggle('ced-formula-node--display', isDisplay);
+        interactiveNode.dataset.cedFormulaLatex = latex;
+        interactiveNode.dataset.cedFormulaDisplay = isDisplay ? '1' : '0';
+        interactiveNode.setAttribute('title', '点击复制公式');
+
+        if (interactiveNode !== formulaRoot) {
+          formulaRoot.classList.remove('ced-formula-node', 'ced-formula-node--display');
+          delete formulaRoot.dataset.cedFormulaLatex;
+          delete formulaRoot.dataset.cedFormulaDisplay;
+          formulaRoot.removeAttribute('title');
+        }
       });
     }
 
-    ensureCopyButton(formulaRoot) {
-      const existing = Array.from(formulaRoot.children || []).find((child) =>
-        child instanceof HTMLElement && child.classList.contains('ced-formula-copy-btn'),
-      );
-      if (existing instanceof HTMLButtonElement) {
-        return existing;
-      }
-
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'ced-formula-copy-btn';
-      button.setAttribute('data-ced-formula-copy-action', 'copy');
-      button.setAttribute('aria-label', '复制公式');
-      formulaRoot.appendChild(button);
-      return button;
-    }
-
-    updateCopyButtonLabels() {
-      document.querySelectorAll('.ced-formula-copy-btn').forEach((button) => {
-        if (!(button instanceof HTMLButtonElement)) return;
-        button.textContent = this.getCopyButtonLabel();
-      });
-    }
-
-    getCopyButtonLabel() {
-      if (this.format === 'mathml') return '复制 MathML';
-      return '复制 LaTeX';
+    resolveInteractiveNode(formulaRoot, isDisplay) {
+      if (!(formulaRoot instanceof HTMLElement)) return null;
+      if (!isDisplay) return formulaRoot;
+      const inner = formulaRoot.querySelector(':scope > .katex');
+      if (inner instanceof HTMLElement) return inner;
+      return formulaRoot.querySelector('.katex') || formulaRoot;
     }
 
     isDisplayMode(node) {
@@ -335,15 +320,9 @@
     }
 
     async handleClick(event) {
-      const actionButton =
-        isElement(event.target) &&
-        event.target.closest('[data-ced-formula-copy-action="copy"]');
-      if (!(actionButton instanceof HTMLButtonElement)) {
-        return;
-      }
-
-      const formulaNode = actionButton.closest('.ced-formula-node');
+      const formulaNode = isElement(event.target) && event.target.closest('.ced-formula-node');
       if (!(formulaNode instanceof HTMLElement)) return;
+      if (event.defaultPrevented) return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -356,16 +335,6 @@
 
       const copied = await this.copyToClipboard(payload);
       this.showToast(formulaNode, copied ? payload.successMessage : '复制失败', copied);
-    }
-
-    async handleKeydown(event) {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      const target = isElement(event.target) ? event.target : null;
-      if (!(target instanceof HTMLButtonElement)) return;
-      if (!target.matches('[data-ced-formula-copy-action="copy"]')) return;
-
-      event.preventDefault();
-      target.click();
     }
 
     async copyToClipboard(payload) {

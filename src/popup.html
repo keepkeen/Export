@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ChronoChat Studio</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup__header">
+        <h1 class="popup__title">ChronoChat Studio</h1>
+        <p class="popup__hint" id="popup-tab-hint">当前页：检测中...</p>
+      </header>
+
+      <section class="popup__section">
+        <h2 class="section-title">时间线与其他设置</h2>
+        <label class="field">
+          <span class="field__label">公式复制格式</span>
+          <select id="setting-formula-format"></select>
+        </label>
+        <label class="toggle-field">
+          <input id="setting-timeline-enabled" type="checkbox">
+          <span>启用时间轴</span>
+        </label>
+        <label class="toggle-field">
+          <input id="setting-title-updater-enabled" type="checkbox">
+          <span>标签标题同步</span>
+        </label>
+        <label class="toggle-field">
+          <input id="setting-title-updater-include-folder" type="checkbox">
+          <span>标题包含文件夹前缀</span>
+        </label>
+        <label class="toggle-field">
+          <input id="setting-sidebar-autohide-enabled" type="checkbox">
+          <span>侧边栏自动隐藏</span>
+        </label>
+        <label class="field">
+          <span class="field__label">文件夹层级间距</span>
+          <div class="range-field">
+            <input id="setting-folder-spacing" type="range" min="0" max="16" step="1">
+            <span id="setting-folder-spacing-value">2px</span>
+          </div>
+        </label>
+        <label class="toggle-field">
+          <input id="setting-markdown-patcher-enabled" type="checkbox">
+          <span>Markdown 修复增强</span>
+        </label>
+        <label class="toggle-field">
+          <input id="setting-snow-effect-enabled" type="checkbox">
+          <span>Snow Effect</span>
+        </label>
+      </section>
+
+      <footer class="popup__footer" id="popup-status"></footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Chat Exporter (ChatGPT + Gemini + Claude + Grok)",
-  "description": "Dockable sidebar for exporting ChatGPT, Gemini, Claude, and Grok conversations to text, markdown, Word, JSON, Excel, CSV, PDF, screenshot and more.",
+  "name": "ChronoChat Studio (ChatGPT + Gemini + Claude + Grok)",
+  "description": "Timeline-first workspace and export extension for ChatGPT, Gemini, Claude, and Grok. Export to text, markdown, Word, JSON, Excel, CSV, PDF, screenshot and more.",
   "version": "0.1.0",
   "permissions": [
     "storage",
@@ -85,7 +85,8 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "Chat Exporter (ChatGPT + Gemini + Claude + Grok)",
+    "default_title": "ChronoChat Studio (ChatGPT + Gemini + Claude + Grok)",
+    "default_popup": "src/popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -98,7 +99,7 @@
         "default": "Ctrl+Shift+Y",
         "mac": "Command+Shift+Y"
       },
-      "description": "Toggle the AI chat exporter sidebar"
+      "description": "Toggle the ChronoChat Studio panel"
     }
   }
 }

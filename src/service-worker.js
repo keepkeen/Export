@@ -107,7 +107,7 @@ async function rebuildContextMenus() {
 async function sendToggle(tabId) {
   const tab = await resolveChatTab(tabId);
   if (!tab) {
-    console.warn('[Chat Exporter] No supported chat tab to toggle');
+    console.warn('[ChronoChat Studio] No supported chat tab to toggle');
     return;
   }
   await sendMessageToTab(tab.id, { type: 'CED_TOGGLE_PANEL' });
@@ -116,7 +116,7 @@ async function sendToggle(tabId) {
 async function sendQuickExport(tabId) {
   const tab = await resolveChatTab(tabId);
   if (!tab) {
-    console.warn('[Chat Exporter] No supported chat tab to export');
+    console.warn('[ChronoChat Studio] No supported chat tab to export');
     return;
   }
   await sendMessageToTab(tab.id, { type: 'CED_EXPORT_NOW' });
@@ -130,7 +130,7 @@ async function resolveChatTab(preferredId) {
         return preferred;
       }
     } catch (error) {
-      console.debug('[Chat Exporter] Preferred tab not available', error);
+      console.debug('[ChronoChat Studio] Preferred tab not available', error);
     }
   }
   const [active] = await chrome.tabs.query({
@@ -170,7 +170,7 @@ async function sendMessageToTab(tabId, payload) {
   try {
     await chrome.tabs.sendMessage(tabId, payload);
   } catch (error) {
-    console.warn('[Chat Exporter] Failed to reach tab', error);
+    console.warn('[ChronoChat Studio] Failed to reach tab', error);
   }
 }
 
