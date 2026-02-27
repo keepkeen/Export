@@ -1,0 +1,3123 @@
+// src/content-script.js
+(() => {
+  if (window.__cedInitialized) {
+    return;
+  }
+  window.__cedInitialized = true;
+
+  // Patch html2canvas color parsing for modern CSS color functions.
+  function patchHtml2canvasColorParser(attempt = 0) {
+    const MODERN_COLOR_RE = /\b(?:oklch|oklab|lch|lab|color)\([^)]+\)/gi;
+
+    const colorConverterEl = document.createElement('div');
+    colorConverterEl.style.display = 'none';
+    const mountTarget = document.body || document.documentElement;
+    if (!mountTarget) {
+      if (attempt <= 10) {
+        setTimeout(() => patchHtml2canvasColorParser(attempt + 1), 300);
+      }
+      return;
+    }
+    // 必须挂载到文档中才能确保 computedStyle 工作
+    mountTarget.appendChild(colorConverterEl);
+
+    const toRgb = (colorStr) => {
+      try {
+        colorConverterEl.style.color = '';
+        colorConverterEl.style.color = colorStr;
+        if (colorConverterEl.style.color) {
+          const computed = window.getComputedStyle(colorConverterEl).color;
+          if (computed && computed !== '') return computed;
+        }
+      } catch (e) { /* ignore */ }
+      return colorStr;
+    };
+
+    const normalizeString = (value) => {
+      if (!value || typeof value !== 'string') return value;
+      if (!MODERN_COLOR_RE.test(value)) return value;
+      return value.replace(MODERN_COLOR_RE, (match) => toRgb(match));
+    };
+
+    const patchInstance = (instance) => {
+      if (!instance) return false;
+      const target = instance.default && instance.default.Util ? instance.default : instance;
+      if (!target) return false;
+
+      let patched = false;
+      if (target.Util?.parseColor && !target.Util.parseColor.__cedPatched) {
+        const original = target.Util.parseColor;
+        target.Util.parseColor = function (value) {
+          return original.call(this, normalizeString(value));
+        };
+        target.Util.parseColor.__cedPatched = true;
+        patched = true;
+      }
+      return patched;
+    };
+
+    const tryScopes = [
+      typeof globalThis !== 'undefined' ? globalThis : undefined,
+      typeof window !== 'undefined' ? window : undefined
+    ].filter(Boolean);
+
+    let patchedAny = false;
+    for (const scope of tryScopes) {
+      if (!scope) continue;
+      if (patchInstance(scope.html2canvas)) patchedAny = true;
+      if (patchInstance(scope['html2canvas-pro'])) patchedAny = true;
+    }
+
+    if (attempt > 5) {
+      if (colorConverterEl.parentNode) colorConverterEl.parentNode.removeChild(colorConverterEl);
+    } else {
+      setTimeout(() => patchHtml2canvasColorParser(attempt + 1), 500);
+    }
+  }
+
+  function resolveHtml2canvas() {
+    const scopes = [
+      typeof window !== 'undefined' ? window : undefined,
+      typeof globalThis !== 'undefined' ? globalThis : undefined
+    ].filter(Boolean);
+
+    for (const scope of scopes) {
+      const candidate = scope.__cedHtml2canvas || scope['html2canvas-pro'] || scope.html2canvas;
+      if (!candidate) continue;
+      const fn = typeof candidate === 'function' ? candidate : candidate?.default;
+      if (typeof fn === 'function') {
+        scope.__cedHtml2canvas = fn;
+        return fn;
+      }
+    }
+    return null;
+  }
+
+  // =========================
+  //  配置与状态
+  // =========================
+
+  const EXPORT_FORMATS = [
+    { id: 'text', label: 'Text', ext: 'txt', description: '纯文本内容' },
+    { id: 'markdown', label: 'Markdown', ext: 'md', description: '带格式与附件' },
+    { id: 'screenshot', label: 'Screenshot', ext: 'png', description: '整段对话截图' },
+    { id: 'pdf', label: 'PDF', ext: 'pdf', description: '分页 PDF' },
+    { id: 'word', label: 'Word', ext: 'doc', description: '可编辑文档' },
+    { id: 'html', label: 'HTML', ext: 'html', description: '独立网页' },
+    { id: 'json', label: '{ } JSON', ext: 'json', description: '结构化数据' },
+    { id: 'excel', label: 'Excel', ext: 'xls', description: '表格视图' },
+    { id: 'csv', label: 'CSV', ext: 'csv', description: 'CSV 数据' },
+    { id: 'hide', label: 'Hide', ext: '', description: '隐藏面板' }
+  ];
+
+  const STORAGE_KEYS = {
+    widget: 'ced-widget',
+    format: 'ced-format',
+    selection: 'ced-selection',
+    dock: 'ced-dock',
+    fileName: 'ced-filename'
+  };
+
+  const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
+  const IMAGE_TOKEN_SUFFIX = '__';
+  const PEEK_DELAY_MS = 320;
+
+  const SITE_KEYS = {
+    chatgpt: 'chatgpt',
+    gemini: 'gemini',
+    claude: 'claude',
+    grok: 'grok'
+  };
+
+  function detectSiteKey() {
+    const host = window.location.hostname.toLowerCase();
+    if (host === 'claude.ai' || host.endsWith('.claude.ai')) return SITE_KEYS.claude;
+    if (host === 'grok.com' || host.endsWith('.grok.com')) return SITE_KEYS.grok;
+    if (host === 'gemini.google.com') return SITE_KEYS.gemini;
+    return SITE_KEYS.chatgpt;
+  }
+
+  const SITE_KEY = detectSiteKey();
+  // SITE_CONFIG contract:
+  // - selectors { MESSAGE_TURN, ROLE_USER, ROLE_ASSISTANT, AI_CONTENT, USER_CONTENT }
+  // - conversationRootSelectors[]
+  // - scrollContainerSelectors[]
+  // - roleLabels { user, assistant }
+  // - defaultTitle / titleStripRegex
+  // - optional: activeConversationTitleSelector, autoScrollStrategy, exportBaseName, fallbackMessageSelectors[]
+  const SITE_CONFIG = {
+    [SITE_KEYS.chatgpt]: {
+      selectors: {
+        MESSAGE_TURN: '[data-testid^="conversation-turn-"], article',
+        ROLE_USER: '[data-message-author-role="user"]',
+        ROLE_ASSISTANT: '[data-message-author-role="assistant"]',
+        AI_CONTENT: '.markdown, .prose, [data-message-author-role="assistant"] .text-message',
+        USER_CONTENT: '[data-message-author-role="user"]'
+      },
+      conversationRootSelectors: [
+        '[data-testid="conversation-main"]',
+        '[data-testid="conversation-container"]',
+        'main'
+      ],
+      scrollContainerSelectors: [
+        'main .overflow-y-auto',
+        '[data-testid="conversation-main"]',
+        'main'
+      ],
+      roleLabels: {
+        user: 'You',
+        assistant: 'ChatGPT'
+      },
+      defaultTitle: 'ChatGPT Conversation',
+      titleStripRegex: /\s*-\s*ChatGPT.*/i,
+      autoScrollStrategy: 'chatgpt_like',
+      exportBaseName: 'chatgpt-export',
+      fallbackMessageSelectors: [
+        '[data-testid^="conversation-turn-"]',
+        '[data-message-author-role]',
+        'article'
+      ]
+    },
+    [SITE_KEYS.gemini]: {
+      selectors: {
+        MESSAGE_TURN: 'user-query, model-response',
+        ROLE_USER: 'user-query',
+        ROLE_ASSISTANT: 'model-response',
+        AI_CONTENT: 'message-content, .markdown',
+        USER_CONTENT: 'div.query-content, .query-content, .query-text'
+      },
+      conversationRootSelectors: [
+        '[data-test-id="chat-history-container"]',
+        '#chat-history',
+        '.chat-history',
+        'main'
+      ],
+      scrollContainerSelectors: [
+        '[data-test-id="chat-history-container"]',
+        '#chat-history',
+        '.chat-history-scroll-container',
+        'main'
+      ],
+      roleLabels: {
+        user: 'You',
+        assistant: 'Gemini'
+      },
+      defaultTitle: 'Gemini Conversation',
+      titleStripRegex: /^Gemini\s*-\s*/i,
+      activeConversationTitleSelector: 'div[data-test-id="conversation"].selected .conversation-title',
+      autoScrollStrategy: 'gemini_like',
+      exportBaseName: 'gemini-export',
+      fallbackMessageSelectors: [
+        'user-query',
+        'model-response',
+        '[data-test-id*="message"]',
+        '.conversation-turn'
+      ]
+    },
+    [SITE_KEYS.claude]: {
+      selectors: {
+        MESSAGE_TURN: '[data-testid="user-message"], [data-testid*="assistant-message"], [data-testid*="chat-message"], [data-author-role], [data-message-author-role], div.font-user-message, div.font-claude-message, [data-test-render-count] > div, article',
+        ROLE_USER: '[data-testid="user-message"], [data-testid*="user-message"], div.font-user-message, [data-author-role="user"], [data-role="user"], [data-message-author-role="user"], .user-message',
+        ROLE_ASSISTANT: '[data-testid*="assistant-message"], div.font-claude-message, [data-testid*="claude"], [data-author-role="assistant"], [data-role="assistant"], [data-message-author-role="assistant"], .assistant-message',
+        AI_CONTENT: 'div.font-claude-message, [data-testid*="assistant-message"] [data-testid*="content"], [data-testid*="assistant-message"] .markdown, [data-testid*="assistant-message"] .prose, [data-author-role="assistant"] .markdown, [data-role="assistant"] .markdown, .assistant-message .markdown, .assistant-message, .response-content-markdown, .prose, .markdown',
+        USER_CONTENT: '[data-testid="user-message"], [data-testid*="user-message"] [data-testid*="content"], div.font-user-message, [data-author-role="user"] [data-testid*="content"], [data-role="user"] [data-testid*="content"], [data-testid*="user"] [data-testid*="content"], .whitespace-pre-wrap, [data-author-role="user"], [data-role="user"], .user-message'
+      },
+      conversationRootSelectors: [
+        'main [data-test-render-count]',
+        'main [data-testid="conversation"]',
+        'main [data-testid="chat-messages"]',
+        'main [data-testid*="conversation"]',
+        '[data-test-render-count]',
+        '[data-testid="conversation"]',
+        '[data-testid="chat-messages"]',
+        '[data-testid*="conversation"]',
+        'main'
+      ],
+      scrollContainerSelectors: [
+        'main [data-test-render-count]',
+        '[data-testid="chat-messages"]',
+        '[data-testid*="scroll"]',
+        'main'
+      ],
+      roleLabels: {
+        user: 'You',
+        assistant: 'Claude'
+      },
+      defaultTitle: 'Claude Conversation',
+      titleStripRegex: /\s*[-|]\s*Claude.*/i,
+      activeConversationTitleSelector: '[data-testid="chat-title-button"] .truncate, button[data-testid="chat-title-button"] .truncate, [data-testid*="conversation"][aria-current="page"] [data-testid*="title"]',
+      autoScrollStrategy: 'claude_like',
+      exportBaseName: 'claude-export',
+      fallbackMessageSelectors: [
+        '[data-testid="user-message"]',
+        '[data-testid*="assistant-message"]',
+        'div.font-claude-message',
+        'div.font-user-message',
+        '[data-test-render-count] > div',
+        'main [data-test-render-count] > *',
+        '[data-author-role]',
+        '[data-message-author-role]',
+        'article'
+      ]
+    },
+    [SITE_KEYS.grok]: {
+      selectors: {
+        MESSAGE_TURN: '[data-testid*="message"], [data-role], [data-message-author-role], article, .message',
+        ROLE_USER: '[data-role="user"], [data-message-author-role="user"], [data-testid*="user"], .message.user, .user-message',
+        ROLE_ASSISTANT: '[data-role="assistant"], [data-message-author-role="assistant"], [data-testid*="assistant"], [data-testid*="bot"], .message.assistant, .assistant-message, .ai-message',
+        AI_CONTENT: '[data-role="assistant"] .markdown, [data-message-author-role="assistant"] .markdown, [data-testid*="assistant"] .markdown, .assistant-message .markdown, .ai-message .markdown, .assistant-message, .ai-message, .markdown',
+        USER_CONTENT: '[data-role="user"] .markdown, [data-message-author-role="user"] .markdown, [data-testid*="user"] .markdown, .user-message .markdown, .user-message, [data-role="user"]'
+      },
+      conversationRootSelectors: [
+        '[data-testid="conversation"]',
+        '[data-testid="chat-history"]',
+        '[data-testid*="conversation"]',
+        'main'
+      ],
+      scrollContainerSelectors: [
+        '[data-testid="chat-history"]',
+        '[data-testid*="scroll"]',
+        'main'
+      ],
+      roleLabels: {
+        user: 'You',
+        assistant: 'Grok'
+      },
+      defaultTitle: 'Grok Conversation',
+      titleStripRegex: /\s*[-|]\s*Grok.*/i,
+      activeConversationTitleSelector: '[data-testid*="conversation"][aria-current="page"] [data-testid*="title"]',
+      autoScrollStrategy: 'grok_like',
+      exportBaseName: 'grok-export',
+      fallbackMessageSelectors: [
+        '[data-role]',
+        '[data-message-author-role]',
+        '[data-testid*="message"]',
+        '.message',
+        'article'
+      ]
+    }
+  };
+  const ACTIVE_SITE = SITE_CONFIG[SITE_KEY] || SITE_CONFIG[SITE_KEYS.chatgpt];
+  const SELECTORS = ACTIVE_SITE.selectors;
+  const CONVERSATION_ROOT_SELECTORS = ACTIVE_SITE.conversationRootSelectors;
+  const SCROLL_CONTAINER_SELECTORS = ACTIVE_SITE.scrollContainerSelectors;
+  const ROLE_LABELS = ACTIVE_SITE.roleLabels;
+  const SITE_EXPORT_BASENAME = ACTIVE_SITE.exportBaseName || `${SITE_KEY}-export`;
+
+  const state = {
+    widgetEl: null,
+    panelEl: null,
+    toastEl: null,
+    observer: null,
+    lastRefreshToken: 0,
+    refreshTimer: null,
+    selectedFormat: 'text',
+    turns: [],
+    selectedTurnIds: new Set(),
+    panelSide: 'right',
+    widgetPosition: { x: null, y: 180, edge: 'right' },
+    imageCache: new Map(),
+    exporting: false,
+    fileName: '',
+    pageTitle: '',
+    nameInput: null,
+    peekTimer: null,
+    widgetGuardObserver: null,
+    isWidgetDragging: false,
+    parseMode: 'normal',
+    formulaHydrateTimer: null,
+    formulaHintEl: null,
+    formulaHintTimer: null
+  };
+
+  // --- 初始化 ---
+  if (chrome?.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (!message || typeof message !== 'object') return undefined;
+      if (message.type === 'CED_TOGGLE_PANEL') {
+        togglePanel();
+        sendResponse?.({ ok: true });
+        return true;
+      }
+      if (message.type === 'CED_EXPORT_NOW') {
+        togglePanel(true);
+        requestAnimationFrame(() => exportSelection());
+        sendResponse?.({ ok: true });
+        return true;
+      }
+      return undefined;
+    });
+  }
+
+  init().catch((error) => console.error('[Chat Exporter] init failed', error));
+
+  async function init() {
+    await ensureDocumentReady();
+    patchHtml2canvasColorParser();
+    await hydrateSettings();
+    injectToast();
+    attachWidget();
+    attachPanel();
+    setupChatGptFormulaCopySupport();
+    await refreshConversationData();
+    observeConversation();
+  }
+
+  async function ensureDocumentReady() {
+    if (document.body) return;
+    await new Promise((resolve) => {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', resolve, { once: true });
+      } else {
+        resolve();
+      }
+    });
+  }
+
+  // --- UI 组件 (Widget / Panel / Toast) ---
+  function injectToast() {
+    if (document.querySelector('.ced-toast')) return;
+    const toast = document.createElement('div');
+    toast.className = 'ced-toast';
+    document.body.appendChild(toast);
+    state.toastEl = toast;
+  }
+
+  function showToast(message, duration = 2200) {
+    if (!state.toastEl) return;
+    state.toastEl.textContent = message;
+    state.toastEl.classList.add('ced-toast--visible');
+    setTimeout(() => state.toastEl && state.toastEl.classList.remove('ced-toast--visible'), duration);
+  }
+
+  async function hydrateSettings() {
+    if (!chrome?.storage?.sync) return;
+    const defaults = {
+      [STORAGE_KEYS.widget]: state.widgetPosition,
+      [STORAGE_KEYS.format]: state.selectedFormat,
+      [STORAGE_KEYS.dock]: state.panelSide,
+      [STORAGE_KEYS.fileName]: state.fileName
+    };
+    const stored = await new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
+    if (stored[STORAGE_KEYS.widget]) state.widgetPosition = stored[STORAGE_KEYS.widget];
+    if (stored[STORAGE_KEYS.format]) state.selectedFormat = stored[STORAGE_KEYS.format];
+    if (stored[STORAGE_KEYS.dock]) state.panelSide = stored[STORAGE_KEYS.dock];
+    if (typeof stored[STORAGE_KEYS.fileName] === 'string') state.fileName = stored[STORAGE_KEYS.fileName];
+  }
+
+  function persist(key, value) {
+    if (!chrome?.storage?.sync) return;
+    chrome.storage.sync.set({ [key]: value });
+  }
+
+  function attachWidget() {
+    if (document.querySelector('.ced-floating-button')) return;
+    const button = document.createElement('button');
+    button.className = 'ced-floating-button';
+    button.innerHTML = `
+      <svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px;">
+        <path fill="none" stroke="white" stroke-width="1.5" d="M4 17l4-5 4 3 6-9" stroke-linecap="round" stroke-linejoin="round"></path>
+        <circle cx="6" cy="19" r="1.6" fill="white"></circle>
+        <circle cx="11.8" cy="15.2" r="1.6" fill="white"></circle>
+        <circle cx="18.5" cy="6" r="1.6" fill="white"></circle>
+      </svg>`;
+    document.body.appendChild(button);
+    state.widgetEl = button;
+    hydrateWidgetPosition();
+    enableDrag(button);
+    guardWidgetPresence();
+
+    button.addEventListener('click', (e) => {
+      if (button.dataset.cedDragged === 'true') {
+        button.dataset.cedDragged = 'false';
+        return;
+      }
+      togglePanel(true);
+      e.stopPropagation();
+    });
+  }
+
+  function hydrateWidgetPosition() {
+    const { y, edge } = state.widgetPosition;
+    const btn = state.widgetEl;
+    if (!btn) return;
+    btn.classList.remove('ced-docked-left', 'ced-docked-right');
+    if (edge === 'left') {
+      btn.style.left = '0';
+      btn.style.right = 'auto';
+      btn.classList.add('ced-docked-left');
+      state.panelSide = 'left';
+    } else {
+      btn.style.right = '0';
+      btn.style.left = 'auto';
+      btn.classList.add('ced-docked-right');
+      state.panelSide = 'right';
+    }
+    btn.style.top = `${y ?? 180}px`;
+  }
+
+  function enableDrag(button) {
+    let pointerId = null;
+    let start = null;
+
+    button.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      pointerId = e.pointerId;
+      const rect = button.getBoundingClientRect();
+      start = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      button.setPointerCapture(pointerId);
+      button.dataset.cedDragged = 'false';
+      state.isWidgetDragging = true;
+      button.classList.remove('ced-docked-left', 'ced-docked-right');
+    });
+
+    button.addEventListener('pointermove', (e) => {
+      if (pointerId === null) return;
+      button.dataset.cedDragged = 'true';
+      const nextTop = Math.min(window.innerHeight - 60, Math.max(12, e.clientY - start.y));
+      const nextLeft = Math.min(window.innerWidth - 60, Math.max(12, e.clientX - start.x));
+      button.style.top = `${Math.round(nextTop)}px`;
+      button.style.left = `${Math.round(nextLeft)}px`;
+      button.style.right = 'auto';
+    });
+
+    const onUp = () => {
+      if (pointerId === null) return;
+      button.releasePointerCapture(pointerId);
+      pointerId = null;
+      state.isWidgetDragging = false;
+
+      const rect = button.getBoundingClientRect();
+      const distLeft = rect.left + rect.width / 2;
+      const distRight = window.innerWidth - (rect.right - rect.width / 2);
+
+      button.classList.remove('ced-docked-left', 'ced-docked-right');
+      if (distLeft <= distRight) {
+        button.style.left = '0';
+        button.style.right = 'auto';
+        state.panelSide = 'left';
+        button.classList.add('ced-docked-left');
+      } else {
+        button.style.right = '0';
+        button.style.left = 'auto';
+        state.panelSide = 'right';
+        button.classList.add('ced-docked-right');
+      }
+
+      persist(STORAGE_KEYS.dock, state.panelSide);
+      state.widgetPosition = {
+        x: 0,
+        y: parseFloat(button.style.top),
+        edge: state.panelSide
+      };
+      persist(STORAGE_KEYS.widget, state.widgetPosition);
+      if (state.panelEl) {
+        state.panelEl.classList.remove('ced-panel--left', 'ced-panel--right');
+        state.panelEl.classList.add(`ced-panel--${state.panelSide}`);
+      }
+    };
+
+    button.addEventListener('pointerup', onUp);
+    button.addEventListener('pointercancel', onUp);
+  }
+
+  function attachPanel() {
+    if (document.querySelector('.ced-panel')) return;
+    const panel = document.createElement('aside');
+    panel.className = `ced-panel ced-panel--${state.panelSide}`;
+    panel.innerHTML = `
+      <div class="ced-panel__header">
+        <div class="ced-panel__title">AI Chat Export</div>
+        <button class="ced-button ced-button--ghost" data-ced-action="close">✕</button>
+      </div>
+      <div class="ced-panel__body"></div>
+    `;
+    document.body.appendChild(panel);
+    state.panelEl = panel;
+
+    const body = panel.querySelector('.ced-panel__body');
+    body.appendChild(buildFormatSection());
+    body.appendChild(buildFileNameSection());
+    body.appendChild(buildTurnsSection());
+    body.appendChild(buildActionSection());
+
+    panel.addEventListener('click', (e) => {
+      const action = e.target.closest('[data-ced-action]')?.dataset.cedAction;
+      if (action === 'close') togglePanel(false);
+      if (action === 'select-all') handleSelectAll();
+      if (action === 'export') exportSelection();
+    });
+
+    panel.addEventListener('mouseenter', () => {
+      if (state.peekTimer) {
+        clearTimeout(state.peekTimer);
+        state.peekTimer = null;
+      }
+      if (panel.classList.contains('ced-panel--peek')) {
+        panel.classList.remove('ced-panel--peek');
+        panel.classList.add('ced-panel--open');
+        state.widgetEl?.classList.add('ced-panel-is-open');
+        refreshConversationData();
+      }
+    });
+
+    panel.addEventListener('mouseleave', () => {
+      if (!panel.classList.contains('ced-panel--open')) return;
+      if (state.peekTimer) {
+        clearTimeout(state.peekTimer);
+      }
+      state.peekTimer = setTimeout(() => {
+        panel.classList.remove('ced-panel--open');
+        panel.classList.add('ced-panel--peek');
+        state.widgetEl?.classList.remove('ced-panel-is-open');
+        state.peekTimer = null;
+      }, PEEK_DELAY_MS);
+    });
+  }
+
+  function buildFormatSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">导出格式</div>';
+    const grid = document.createElement('div');
+    grid.className = 'ced-format-grid';
+
+    EXPORT_FORMATS.forEach((fmt) => {
+      const btn = document.createElement('button');
+      btn.className = 'ced-format-button';
+      if (fmt.id === state.selectedFormat) btn.classList.add('ced-format-button--active');
+      btn.innerHTML = `<div>${fmt.label}</div><small style="opacity:.65;font-size:12px;">${fmt.description}</small>`;
+      btn.addEventListener('click', () => {
+        if (fmt.id === 'hide') return togglePanel(false);
+        state.selectedFormat = fmt.id;
+        persist(STORAGE_KEYS.format, fmt.id);
+        section
+          .querySelectorAll('.ced-format-button')
+          .forEach((b) => b.classList.remove('ced-format-button--active'));
+        btn.classList.add('ced-format-button--active');
+      });
+      grid.appendChild(btn);
+    });
+    section.appendChild(grid);
+    return section;
+  }
+
+  function buildFileNameSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">文件命名</div>';
+    const input = document.createElement('input');
+    input.className = 'ced-input';
+    input.value = state.fileName;
+    input.placeholder = state.pageTitle || ACTIVE_SITE.defaultTitle;
+    input.addEventListener('input', () => {
+      state.fileName = input.value.trim();
+      persist(STORAGE_KEYS.fileName, state.fileName);
+    });
+    state.nameInput = input;
+    section.appendChild(input);
+    return section;
+  }
+
+  function buildTurnsSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">对话轮次</div>';
+    const list = document.createElement('div');
+    list.className = 'ced-turn-list';
+    list.dataset.list = 'turns';
+    section.appendChild(list);
+    return section;
+  }
+
+  function buildActionSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = `
+      <div class="ced-actions">
+        <button class="ced-button ced-button--ghost" data-ced-action="select-all">全选 / 取消</button>
+        <button class="ced-button ced-button--primary" data-ced-action="export">立即导出</button>
+      </div>`;
+    return section;
+  }
+
+  function togglePanel(forceOpen) {
+    const panel = state.panelEl;
+    const button = state.widgetEl;
+    if (!panel || !button) return;
+
+    const currentlyOpen = panel.classList.contains('ced-panel--open');
+    const currentlyPeeking = panel.classList.contains('ced-panel--peek');
+    let shouldOpen;
+    if (typeof forceOpen === 'boolean') {
+      shouldOpen = forceOpen;
+    } else if (currentlyPeeking) {
+      shouldOpen = true;
+    } else {
+      shouldOpen = !currentlyOpen;
+    }
+
+    if (state.peekTimer) {
+      clearTimeout(state.peekTimer);
+      state.peekTimer = null;
+    }
+    panel.classList.remove('ced-panel--left', 'ced-panel--right', 'ced-panel--open', 'ced-panel--peek');
+    button.classList.remove('ced-panel-is-open');
+    panel.classList.add(`ced-panel--${state.panelSide}`);
+
+    if (shouldOpen) {
+      panel.classList.add('ced-panel--open');
+      button.classList.add('ced-panel-is-open');
+      refreshConversationData();
+    }
+  }
+
+  function guardWidgetPresence() {
+    if (state.widgetGuardObserver) state.widgetGuardObserver.disconnect();
+    if (!document.body) return;
+    state.widgetGuardObserver = new MutationObserver((mutations) => {
+      if (!state.widgetEl) return;
+      for (const mutation of mutations) {
+        const removed = Array.from(mutation.removedNodes);
+        if (removed.includes(state.widgetEl)) {
+          document.body.appendChild(state.widgetEl);
+          break;
+        }
+      }
+    });
+    state.widgetGuardObserver.observe(document.body, { childList: true });
+  }
+
+  // --- 数据解析 (Data Parsing) ---
+
+  async function refreshConversationData() {
+    const token = ++state.lastRefreshToken;
+    const previousTurnsLength = state.turns.length;
+    const previousSelection = new Set(state.selectedTurnIds);
+    const wasAllSelected = previousTurnsLength > 0 && previousSelection.size === previousTurnsLength;
+
+    state.pageTitle = detectConversationTitle();
+    if (state.nameInput) state.nameInput.placeholder = state.pageTitle || ACTIVE_SITE.defaultTitle;
+
+    const turns = collectConversationTurns();
+    state.turns = turns;
+
+    const nextSelection = new Set();
+    if (wasAllSelected || previousSelection.size === 0) {
+      turns.forEach((turn) => nextSelection.add(turn.id));
+    } else {
+      turns.forEach((turn) => {
+        if (previousSelection.has(turn.id)) {
+          nextSelection.add(turn.id);
+        }
+      });
+      if (!nextSelection.size) {
+        turns.forEach((turn) => nextSelection.add(turn.id));
+      }
+    }
+    state.selectedTurnIds = nextSelection;
+
+    if (token === state.lastRefreshToken) updateTurnList();
+  }
+
+  function collectConversationTurns() {
+    const root = resolveCollectionRoot();
+    const scopedNodes = root?.querySelectorAll?.(SELECTORS.MESSAGE_TURN) || [];
+    const allNodes = document.querySelectorAll(SELECTORS.MESSAGE_TURN);
+    const uniqueNodes = dedupeMessageNodes([
+      ...Array.from(scopedNodes),
+      ...Array.from(allNodes)
+    ]).filter(isLikelyMessageNode);
+    const signatureCountMap = new Map();
+    const turns = uniqueNodes.map((node) => parseMessage(node, signatureCountMap)).filter(Boolean);
+    if (turns.length) {
+      state.parseMode = 'normal';
+      return turns;
+    }
+
+    const fallbackTurns = collectFallbackTurns(root);
+    if (fallbackTurns.length) {
+      state.parseMode = 'fallback';
+      return fallbackTurns;
+    }
+
+    state.parseMode = 'normal';
+    return [];
+  }
+
+  function collectFallbackTurns(root) {
+    const scope = root || document.body;
+    if (!scope) return [];
+    const selectors = ACTIVE_SITE.fallbackMessageSelectors?.length
+      ? ACTIVE_SITE.fallbackMessageSelectors
+      : ['[data-message-author-role]', '[data-role]', '[data-testid*="message"]', 'article'];
+
+    const seen = new Set();
+    const candidates = [];
+    selectors.forEach((selector) => {
+      Array.from(scope.querySelectorAll(selector)).forEach((node) => {
+        if (!(node instanceof HTMLElement)) return;
+        if (seen.has(node)) return;
+        seen.add(node);
+        if (!isLikelyMessageNode(node)) return;
+        candidates.push(node);
+      });
+    });
+
+    const topLevelCandidates = dedupeMessageNodes(candidates);
+
+    const signatureCountMap = new Map();
+    const turns = topLevelCandidates
+      .map((node) => parseMessage(node, signatureCountMap))
+      .filter(Boolean);
+    if (turns.length) return turns;
+    return buildFallbackSingleTurn(scope);
+  }
+
+  function isLikelyMessageNode(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-hint')) return false;
+
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+
+    const rect = node.getBoundingClientRect();
+    if (!rect.width && !rect.height) return false;
+
+    const text = node.innerText?.replace(/\s+/g, ' ').trim() || '';
+    const imageCount = node.querySelectorAll('img').length;
+    if (text.length < 6 && !imageCount) return false;
+
+    const hint = `${node.className || ''} ${node.getAttribute('data-testid') || ''} ${node.getAttribute('data-role') || ''}`.toLowerCase();
+    const looksLikeNav = /(sidebar|history|toolbar|header|footer|composer|input|search|nav|menu)/.test(hint);
+    const looksLikeMessage = /(message|chat|conversation|assistant|user|model|reply)/.test(hint);
+    if (looksLikeNav && !looksLikeMessage) return false;
+    return true;
+  }
+
+  function buildFallbackSingleTurn(root) {
+    if (!root) return [];
+    const text = root.innerText?.trim() || '';
+    if (!text) return [];
+
+    const markdown = text.replace(/\n{3,}/g, '\n\n');
+    const fallbackId = `ced-fallback-${hashString(`${SITE_KEY}-${normalizeSignatureText(text)}`)}`;
+    return [{
+      id: fallbackId,
+      role: 'assistant',
+      node: root,
+      text,
+      markdown,
+      markdownResolved: markdown,
+      html: root.innerHTML || '',
+      images: extractImages(root),
+      attachments: extractAttachments(root),
+      formulas: [],
+      preview: text.slice(0, 100)
+    }];
+  }
+
+  function parseMessage(node, signatureCountMap) {
+    const role = detectNodeRole(node);
+    const contentNode = resolveContentNode(node, role);
+    if (!contentNode) {
+      return null;
+    }
+
+    const visualClone = contentNode.cloneNode(true);
+    staticizeDynamicContent(contentNode, visualClone);
+    replaceButtonsWithSpans(visualClone);
+    visualClone.querySelectorAll('.sr-only, script, style').forEach((el) => el.remove());
+    const visualHtml = visualClone.innerHTML;
+
+    const formulas = [];
+    const textClone = contentNode.cloneNode(true);
+    annotateImages(textClone);
+    normalizeClone(textClone, formulas);
+
+    const text = textClone.textContent?.trim() || '';
+    const markdown = toMarkdown(textClone).trim().replace(/\n{3,}/g, '\n\n');
+
+    const sourceImages = extractImages(contentNode);
+    const markdownImages = extractImages(textClone);
+    const images = mergeImageSources(markdownImages, sourceImages);
+    const attachments = extractAttachments(textClone);
+
+    if (!text && !images.length && !attachments.length) {
+      return null;
+    }
+
+    const baseSignature = buildMessageSignature({
+      role,
+      text,
+      markdown,
+      html: visualHtml,
+      images,
+      attachments
+    });
+    const occurrence = signatureCountMap.get(baseSignature) || 0;
+    signatureCountMap.set(baseSignature, occurrence + 1);
+    const messageId = `${baseSignature}-${occurrence}`;
+    node.dataset.cedMessageId = messageId;
+
+    const turn = {
+      id: messageId,
+      role,
+      node,
+      text,
+      markdown,
+      html: visualHtml,
+      images,
+      attachments,
+      formulas,
+      preview: text.slice(0, 100)
+    };
+
+    turn.markdownResolved = markdown;
+    return turn;
+  }
+
+  function buildMessageSignature(message) {
+    const parts = [
+      SITE_KEY,
+      message.role || '',
+      normalizeSignatureText(message.text || ''),
+      normalizeSignatureText(message.markdown || ''),
+      normalizeSignatureText(message.html || ''),
+      (message.images || []).map((img) => img?.src || '').join('|'),
+      (message.attachments || []).map((item) => item?.href || '').join('|')
+    ];
+    return `ced-${hashString(parts.join('||'))}`;
+  }
+
+  function normalizeSignatureText(value) {
+    return (value || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 1200);
+  }
+
+  function hashString(input) {
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash +=
+        (hash << 1) +
+        (hash << 4) +
+        (hash << 7) +
+        (hash << 8) +
+        (hash << 24);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function detectNodeRole(node) {
+    const tag = node.tagName?.toLowerCase();
+    if (tag === 'user-query') return 'user';
+    if (tag === 'model-response') return 'assistant';
+    if (SITE_KEY === SITE_KEYS.claude) {
+      if (node.matches('div.font-user-message, [data-testid="user-message"], [data-testid*="user-message"]')) return 'user';
+      if (node.matches('div.font-claude-message, [data-testid*="assistant-message"], [data-testid*="claude"]')) return 'assistant';
+    }
+
+    let role = resolveRoleFromMetadata(node);
+    if (!role) {
+      if (node.matches(SELECTORS.ROLE_ASSISTANT) || node.querySelector(SELECTORS.ROLE_ASSISTANT) || node.querySelector('message-content') || node.querySelector('.markdown')) {
+        role = 'assistant';
+      } else if (node.matches(SELECTORS.ROLE_USER) || node.querySelector(SELECTORS.ROLE_USER)) {
+        role = 'user';
+      } else {
+        role = 'unknown';
+      }
+    }
+
+    if (role === 'assistant' || role === 'user') return role;
+    if (SITE_KEY === SITE_KEYS.grok) {
+      return node.querySelector('.assistant-message, .ai-message, [data-role="assistant"], [data-testid*="assistant"], .markdown')
+        ? 'assistant'
+        : 'user';
+    }
+    return node.querySelector('message-content, .markdown, .prose, .text-message') ? 'assistant' : 'user';
+  }
+
+  function resolveRoleFromMetadata(node) {
+    const roleHints = [];
+    const pushHint = (value) => {
+      if (typeof value !== 'string') return;
+      const normalized = value.toLowerCase().trim();
+      if (normalized) roleHints.push(normalized);
+    };
+
+    const collectFromElement = (el) => {
+      if (!(el instanceof HTMLElement)) return;
+      pushHint(el.getAttribute('data-message-author-role'));
+      pushHint(el.getAttribute('data-author-role'));
+      pushHint(el.getAttribute('data-role'));
+      pushHint(el.getAttribute('data-testid'));
+      pushHint(el.className);
+    };
+
+    collectFromElement(node);
+    collectFromElement(node.querySelector('[data-message-author-role], [data-author-role], [data-role], [data-testid]'));
+
+    for (const hint of roleHints) {
+      if (/(^|[^a-z])(user|human|you)([^a-z]|$)/.test(hint)) return 'user';
+      if (/(^|[^a-z])(assistant|model|ai|claude|grok|bot)([^a-z]|$)/.test(hint)) return 'assistant';
+    }
+    return null;
+  }
+
+  function resolveContentNode(node, role) {
+    const contentSelector = role === 'user' ? SELECTORS.USER_CONTENT : SELECTORS.AI_CONTENT;
+    const matched = contentSelector ? node.querySelector(contentSelector) : null;
+    if (matched) return matched;
+
+    if (SITE_KEY === SITE_KEYS.chatgpt && role === 'user') {
+      const userMessageRoot = node.querySelector('[data-message-author-role="user"]');
+      return userMessageRoot || node;
+    }
+
+    if (SITE_KEY === SITE_KEYS.gemini) {
+      if (role === 'assistant') {
+        return node.querySelector('message-content') || node;
+      }
+      return node.querySelector('div.query-content')
+        || node.querySelector('.query-content')
+        || node.querySelector('.query-text')
+        || node;
+    }
+
+    if (SITE_KEY === SITE_KEYS.claude) {
+      // Claude turns often contain multiple nested content blocks.
+      // Returning the full turn node keeps markdown/html exports complete.
+      return node;
+    }
+
+    if (SITE_KEY === SITE_KEYS.grok) {
+      if (role === 'assistant') {
+        return node.querySelector('.assistant-message .markdown')
+          || node.querySelector('.ai-message .markdown')
+          || node.querySelector('[data-role="assistant"] .markdown')
+          || node.querySelector('.markdown')
+          || node;
+      }
+      return node.querySelector('.user-message .markdown')
+        || node.querySelector('[data-role="user"] .markdown')
+        || node.querySelector('.markdown')
+        || node;
+    }
+    return node;
+  }
+
+  function normalizeClone(node, formulas) {
+    replaceButtonsWithSpans(node);
+    node.querySelectorAll('script, style, .sr-only').forEach(el => el.remove());
+    node.querySelectorAll('button, [role="button"], [data-testid*="action-bar"], [class*="action-bar"]').forEach((el) => el.remove());
+    node.querySelectorAll('[data-testid*="composer"], [data-testid*="chat-input"], [class*="composer"], [class*="chat-input"]').forEach((el) => el.remove());
+
+    // 提取 LaTeX
+    node.querySelectorAll('.katex').forEach(katexEl => {
+      const latex = extractLatexFromKatexNode(katexEl);
+      if (!latex) return;
+      formulas.push(latex);
+      const isDisplay = katexEl.classList.contains('katex-display') || Boolean(katexEl.closest('.katex-display'));
+      const latexNode = document.createTextNode(isDisplay ? `$$${latex}$$` : `$${latex}$`);
+      katexEl.replaceWith(latexNode);
+    });
+  }
+
+  function extractLatexFromKatexNode(node) {
+    if (!(node instanceof HTMLElement)) return '';
+    const annotation = node.querySelector('annotation');
+    const latex = annotation?.textContent?.trim();
+    return latex || '';
+  }
+
+  function setupChatGptFormulaCopySupport() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    hydrateChatGptFormulaCopyTargets(document);
+    document.addEventListener('click', handleFormulaCopyClick, true);
+    document.addEventListener('keydown', handleFormulaCopyKeydown, true);
+  }
+
+  function scheduleFormulaCopyHydration() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (state.formulaHydrateTimer) {
+      clearTimeout(state.formulaHydrateTimer);
+    }
+    state.formulaHydrateTimer = setTimeout(() => {
+      state.formulaHydrateTimer = null;
+      hydrateChatGptFormulaCopyTargets(document);
+    }, 140);
+  }
+
+  function hydrateChatGptFormulaCopyTargets(root) {
+    if (SITE_KEY !== SITE_KEYS.chatgpt || !root?.querySelectorAll) return;
+    root.querySelectorAll('.katex-display, .katex').forEach((node) => {
+      if (!(node instanceof HTMLElement)) return;
+      if (node.classList.contains('katex') && node.closest('.katex-display')) return;
+      if (node.closest('.ced-panel')) return;
+      const latex = extractLatexFromKatexNode(node);
+      if (!latex) return;
+
+      node.classList.add('ced-latex-copy-target');
+      node.dataset.cedLatex = latex;
+      node.setAttribute('title', '点击复制 LaTeX');
+      node.setAttribute('role', 'button');
+      node.setAttribute('tabindex', '0');
+      node.setAttribute('aria-label', '点击复制 LaTeX');
+    });
+  }
+
+  function isFormulaCopyTarget(target) {
+    if (!(target instanceof Element)) return null;
+    const matched = target.closest('.ced-latex-copy-target');
+    return matched instanceof HTMLElement ? matched : null;
+  }
+
+  async function handleFormulaCopyClick(event) {
+    const target = isFormulaCopyTarget(event.target);
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const latex = target.dataset.cedLatex || extractLatexFromKatexNode(target);
+    if (!latex) return;
+    const copied = await copyTextToClipboard(latex);
+    showFormulaCopyHint(target, copied ? 'LaTeX 已复制' : '复制失败');
+  }
+
+  async function handleFormulaCopyKeydown(event) {
+    const target = isFormulaCopyTarget(event.target);
+    if (!target) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const latex = target.dataset.cedLatex || extractLatexFromKatexNode(target);
+    if (!latex) return;
+    const copied = await copyTextToClipboard(latex);
+    showFormulaCopyHint(target, copied ? 'LaTeX 已复制' : '复制失败');
+  }
+
+  async function copyTextToClipboard(text) {
+    if (!text) return false;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (error) {
+      // fallback below
+    }
+
+    try {
+      const input = document.createElement('textarea');
+      input.value = text;
+      input.setAttribute('readonly', 'readonly');
+      input.style.position = 'fixed';
+      input.style.left = '-9999px';
+      input.style.top = '-9999px';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.focus();
+      input.select();
+      input.setSelectionRange(0, input.value.length);
+      const ok = document.execCommand('copy');
+      input.remove();
+      return ok;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function ensureFormulaCopyHint() {
+    if (state.formulaHintEl?.isConnected) return state.formulaHintEl;
+    const hint = document.createElement('div');
+    hint.className = 'ced-formula-copy-hint';
+    document.body.appendChild(hint);
+    state.formulaHintEl = hint;
+    return hint;
+  }
+
+  function showFormulaCopyHint(anchor, message) {
+    if (!(anchor instanceof HTMLElement)) return;
+    const hint = ensureFormulaCopyHint();
+    hint.textContent = message;
+    positionFormulaCopyHint(anchor, hint);
+    hint.classList.remove('ced-formula-copy-hint--visible');
+    // Force reflow for transition replay.
+    void hint.offsetWidth;
+    hint.classList.add('ced-formula-copy-hint--visible');
+
+    if (state.formulaHintTimer) clearTimeout(state.formulaHintTimer);
+    state.formulaHintTimer = setTimeout(() => {
+      state.formulaHintTimer = null;
+      hint.classList.remove('ced-formula-copy-hint--visible');
+    }, 1200);
+  }
+
+  function positionFormulaCopyHint(anchor, hint) {
+    const rect = anchor.getBoundingClientRect();
+    const margin = 10;
+    const top = Math.max(8, Math.min(window.innerHeight - 8, rect.top + (rect.height / 2)));
+    hint.style.top = `${Math.round(top)}px`;
+
+    hint.style.left = '-9999px';
+    const hintWidth = Math.ceil(hint.getBoundingClientRect().width || hint.offsetWidth || 120);
+    let left = rect.right + margin;
+    if (left + hintWidth > window.innerWidth - 8) {
+      left = Math.max(8, rect.left - hintWidth - margin);
+    }
+    hint.style.left = `${Math.round(left)}px`;
+  }
+
+  function annotateImages(node) {
+    let i = 0;
+    node.querySelectorAll('img').forEach((img) => {
+      img.dataset.cedImageIndex = String(i++);
+    });
+  }
+
+  function extractImages(node) {
+    return Array.from(node.querySelectorAll('img'))
+      .filter((img) => {
+        const width = img.naturalWidth || img.width || 0;
+        const height = img.naturalHeight || img.height || 0;
+        if (width && width < 50 && height && height < 50) {
+          return false;
+        }
+        if (img.closest('.citation') || img.closest('.source-citation')) {
+          return false;
+        }
+        return true;
+      })
+      .map((img) => ({
+        src: img.currentSrc || img.src,
+        alt: img.alt || '',
+        width: img.naturalWidth || img.width || 0,
+        height: img.naturalHeight || img.height || 0,
+        index: img.dataset.cedImageIndex
+      }));
+  }
+
+  function mergeImageSources(markdownImages, sourceImages) {
+    const ordered = (markdownImages || []).map((markdownImage, index) => {
+      const sourceImage = (sourceImages || [])[index] || {};
+      return {
+        ...markdownImage,
+        src: sourceImage.src || markdownImage.src,
+        alt: markdownImage.alt || sourceImage.alt || '',
+        width: sourceImage.width || markdownImage.width || 0,
+        height: sourceImage.height || markdownImage.height || 0
+      };
+    });
+
+    const knownSrc = new Set(ordered.map((img) => img?.src).filter(Boolean));
+    (sourceImages || []).forEach((sourceImage) => {
+      if (!sourceImage?.src || knownSrc.has(sourceImage.src)) return;
+      ordered.push({
+        ...sourceImage,
+        index: sourceImage.index ?? null
+      });
+      knownSrc.add(sourceImage.src);
+    });
+    return ordered;
+  }
+
+  function extractAttachments(node) {
+    return Array.from(node.querySelectorAll('a'))
+      .filter((a) => /\.(pdf|docx?|xlsx?|csv|zip)$/i.test(a.href) || a.hasAttribute('download'))
+      .map((a) => ({ href: a.href, text: a.innerText.trim() }));
+  }
+
+  function toMarkdown(root) {
+    const walk = (node) => {
+      if (node.nodeType === 3) return escapeMarkdown(node.textContent);
+      if (node.nodeType !== 1) return '';
+
+      const tag = node.tagName.toLowerCase();
+      const content = Array.from(node.childNodes).map(walk).join('');
+
+      switch (tag) {
+        case 'p': return content.trim() ? `${content.trim()}\n\n` : '\n\n';
+        case 'br': return '  \n';
+        case 'strong':
+        case 'b': return `**${content}**`;
+        case 'em':
+        case 'i': return `_${content}_`;
+        case 'code': return node.parentNode.tagName === 'PRE' ? content : `\`${content}\``;
+        case 'pre': return `\n\`\`\`\n${node.textContent || ''}\n\`\`\`\n`;
+        case 'ul': return Array.from(node.children).map((li) => `- ${walk(li)}`).join('\n') + '\n';
+        case 'ol': return Array.from(node.children).map((li, i) => `${i + 1}. ${walk(li)}`).join('\n') + '\n';
+        case 'li': return content;
+        case 'a': return `[${content}](${node.href})`;
+        case 'img': {
+          const idx = node.dataset.cedImageIndex;
+          const srcToken = idx ? `${IMAGE_TOKEN_PREFIX}${idx}${IMAGE_TOKEN_SUFFIX}` : node.src || '';
+          return `![${node.alt}](${srcToken})`;
+        }
+        case 'blockquote': return `> ${content}\n`;
+        case 'table': return convertTableToMarkdown(node);
+        default: return content;
+      }
+    };
+    return walk(root).replace(/\n{3,}/g, '\n\n');
+  }
+
+  function convertTableToMarkdown(table) {
+    const rows = Array.from(table.querySelectorAll('tr'));
+    if (!rows.length) return '';
+
+    const processRow = (tr) =>
+      '| ' + Array.from(tr.children).map((td) => td.textContent.trim().replace(/\|/g, '\\|')).join(' | ') + ' |';
+
+    const header = processRow(rows[0]);
+    const divider = '| ' + Array.from(rows[0].children).map(() => '---').join(' | ') + ' |';
+    const body = rows.slice(1).map(processRow).join('\n');
+
+    return `\n${header}\n${divider}\n${body}\n`;
+  }
+
+  function escapeMarkdown(text) {
+    return (text || '').replace(/([\\`*_{}[\]()#+\-.!])/g, '\\$1');
+  }
+
+  function updateTurnList() {
+    const list = state.panelEl?.querySelector('[data-list="turns"]');
+    if (!list) return;
+
+    const existingMap = new Map();
+    Array.from(list.children).forEach((el) => {
+      if (el.dataset.id) existingMap.set(el.dataset.id, el);
+    });
+
+    const newIds = new Set(state.turns.map((t) => t.id));
+
+    // Remove obsolete
+    Array.from(list.children).forEach((el) => {
+      if (!el.dataset.id || !newIds.has(el.dataset.id)) {
+        el.remove();
+      }
+    });
+
+    // Append / Update
+    state.turns.forEach((turn, i) => {
+      let card = existingMap.get(turn.id);
+      const isNew = !card;
+
+      if (isNew) {
+        card = document.createElement('label');
+        card.className = 'ced-turn-card';
+        card.dataset.id = turn.id;
+        card.innerHTML = `
+          <input type="checkbox" class="ced-turn-card__checkbox">
+          <div class="ced-turn-card__body">
+            <div class="ced-turn-card__role"></div>
+            <div class="ced-turn-card__preview"></div>
+          </div>
+        `;
+        card.querySelector('input').addEventListener('change', (e) => {
+          if (e.target.checked) state.selectedTurnIds.add(turn.id);
+          else state.selectedTurnIds.delete(turn.id);
+        });
+      }
+
+      // Re-insert (appendChild moves if exists, ensuring order)
+      list.appendChild(card);
+
+      const checkbox = card.querySelector('.ced-turn-card__checkbox');
+      const isChecked = state.selectedTurnIds.has(turn.id);
+      if (checkbox.checked !== isChecked) checkbox.checked = isChecked;
+
+      const roleEl = card.querySelector('.ced-turn-card__role');
+      const roleHtml = `<span>${i + 1}.</span> ${formatRole(turn.role)}`;
+      if (roleEl.innerHTML !== roleHtml) roleEl.innerHTML = roleHtml;
+
+      const previewEl = card.querySelector('.ced-turn-card__preview');
+      const previewHtml = escapeHtml(turn.preview);
+      if (previewEl.innerHTML !== previewHtml) previewEl.innerHTML = previewHtml;
+    });
+  }
+
+  function formatRole(role) {
+    return ROLE_LABELS[role] || (role === 'assistant' ? ROLE_LABELS.assistant : ROLE_LABELS.user);
+  }
+
+  function handleSelectAll() {
+    const allSelected = state.turns.length > 0 && state.selectedTurnIds.size === state.turns.length;
+    state.selectedTurnIds.clear();
+    if (!allSelected) state.turns.forEach((t) => state.selectedTurnIds.add(t.id));
+    updateTurnList();
+  }
+
+  function observeConversation() {
+    if (state.observer) state.observer.disconnect();
+    state.observer = new MutationObserver(() => {
+      clearTimeout(state.refreshTimer);
+      state.refreshTimer = setTimeout(refreshConversationData, 800);
+      scheduleFormulaCopyHydration();
+    });
+    const target = queryFirst(SCROLL_CONTAINER_SELECTORS) || queryFirst(CONVERSATION_ROOT_SELECTORS) || document.querySelector('main') || document.body;
+    state.observer.observe(target, { childList: true, subtree: true });
+  }
+
+  function detectConversationTitle() {
+    const sidebarTitleSelector = ACTIVE_SITE.activeConversationTitleSelector;
+    if (sidebarTitleSelector) {
+      const sidebarTitle = document.querySelector(sidebarTitleSelector)?.textContent?.trim();
+      if (sidebarTitle) return sidebarTitle;
+    }
+    const title = document.title.replace(ACTIVE_SITE.titleStripRegex, '').trim();
+    return title || ACTIVE_SITE.defaultTitle;
+  }
+
+  // --- 导出核心逻辑 (Export Logic) ---
+
+  // 自动滚动加载完整会话
+  async function autoLoadConversation() {
+    const scrollTarget = queryFirst(SCROLL_CONTAINER_SELECTORS) || document.querySelector('main') || document.documentElement || document.body;
+    if (!scrollTarget) return;
+
+    const originalBehavior = scrollTarget.style.scrollBehavior;
+    scrollTarget.style.scrollBehavior = 'auto';
+
+    showToast('正在加载完整对话...', 6000);
+    try {
+      if (ACTIVE_SITE.autoScrollStrategy === 'gemini_like') {
+        await autoScrollGemini(scrollTarget);
+      } else if (ACTIVE_SITE.autoScrollStrategy === 'claude_like') {
+        await autoScrollClaude(scrollTarget);
+      } else if (ACTIVE_SITE.autoScrollStrategy === 'grok_like') {
+        await autoScrollGrok(scrollTarget);
+      } else {
+        await autoScrollChatGpt(scrollTarget);
+      }
+    } finally {
+      scrollTarget.style.scrollBehavior = originalBehavior;
+    }
+  }
+
+  async function autoScrollChatGpt(scrollTarget) {
+    const viewport = scrollTarget.clientHeight || window.innerHeight || 800;
+    let current = 0;
+    let lastHeight = scrollTarget.scrollHeight;
+
+    while (current < lastHeight) {
+      current = Math.min(current + viewport, lastHeight);
+      scrollTarget.scrollTop = current;
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      const newHeight = scrollTarget.scrollHeight;
+      if (newHeight > lastHeight) {
+        lastHeight = newHeight;
+      }
+    }
+    scrollTarget.scrollTop = 0;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  async function autoScrollGemini(scrollTarget) {
+    const maxAttempts = 40;
+    let lastMessageCount = -1;
+    let stableCount = 0;
+
+    for (let i = 0; i < maxAttempts; i++) {
+      scrollTarget.scrollTop = 0;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const currentCount = document.querySelectorAll(SELECTORS.MESSAGE_TURN).length;
+      if (currentCount === lastMessageCount) {
+        stableCount += 1;
+        if (stableCount >= 3) break;
+      } else {
+        stableCount = 0;
+        lastMessageCount = currentCount;
+      }
+    }
+    scrollTarget.scrollTop = scrollTarget.scrollHeight;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  async function autoScrollClaude(scrollTarget) {
+    // Claude usually lazy-loads older turns when scrolling upward.
+    await autoScrollGemini(scrollTarget);
+    const viewport = scrollTarget.clientHeight || window.innerHeight || 800;
+    const maxPasses = 18;
+    let current = scrollTarget.scrollTop || 0;
+    for (let i = 0; i < maxPasses; i++) {
+      current = Math.min(current + viewport, scrollTarget.scrollHeight);
+      scrollTarget.scrollTop = current;
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      if (Math.abs(scrollTarget.scrollHeight - current) < 8) break;
+    }
+    scrollTarget.scrollTop = 0;
+    await new Promise((resolve) => setTimeout(resolve, 260));
+  }
+
+  async function autoScrollGrok(scrollTarget) {
+    // First probe upward for history loading, then sweep downward for lazy blocks.
+    await autoScrollGemini(scrollTarget);
+    const viewport = scrollTarget.clientHeight || window.innerHeight || 800;
+    let current = scrollTarget.scrollTop || 0;
+    const maxPasses = 18;
+    for (let i = 0; i < maxPasses; i++) {
+      current = Math.min(current + viewport, scrollTarget.scrollHeight);
+      scrollTarget.scrollTop = current;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (Math.abs(scrollTarget.scrollHeight - current) < 8) break;
+    }
+    scrollTarget.scrollTop = scrollTarget.scrollHeight;
+    await new Promise((resolve) => setTimeout(resolve, 260));
+  }
+
+  function looksLikeClaudeFileContainer(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const hint = [
+      element.getAttribute('data-testid') || '',
+      element.getAttribute('aria-label') || '',
+      element.getAttribute('title') || '',
+      element.className || '',
+      element.textContent?.slice(0, 240) || ''
+    ].join(' ').toLowerCase();
+    const fileWords = /(file|artifact|attachment|source|snippet|code|diff|patch|json|yaml|toml|xml|csv|tsv|txt|md|markdown|log|pdf|png|jpg|jpeg|gif|svg|py|js|ts|java|cpp|c\+\+|rb|go|rs|sh|bash|zsh|ps1|文件|附件|代码|源码|展开代码|查看代码|显示文件)/;
+    return fileWords.test(hint);
+  }
+
+  function isClaudeMessageNodeCandidate(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    if (node.closest('aside, nav, footer, form, [data-testid*="sidebar"], [class*="sidebar"], [data-testid*="composer"], [class*="composer"], [class*="chat-input"], [data-testid*="chat-input"], [data-testid*="message-input"]')) {
+      return false;
+    }
+    if (node.matches(SELECTORS.ROLE_USER) || node.matches(SELECTORS.ROLE_ASSISTANT)) {
+      return true;
+    }
+    if (node.querySelector(SELECTORS.ROLE_USER) || node.querySelector(SELECTORS.ROLE_ASSISTANT)) {
+      return true;
+    }
+    const hint = [
+      node.getAttribute('data-testid') || '',
+      node.getAttribute('data-author-role') || '',
+      node.getAttribute('data-role') || '',
+      node.className || ''
+    ].join(' ').toLowerCase();
+    const looksLikeMessage = /(message|chat|conversation|font-user-message|font-claude-message|assistant|user)/.test(hint);
+    const looksLikeUiChrome = /(sidebar|composer|input|history|toolbar|menu|header|footer|nav)/.test(hint);
+    return looksLikeMessage && !looksLikeUiChrome;
+  }
+
+  function isClaudeActionBarControl(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const hint = [
+      element.getAttribute('data-testid') || '',
+      element.getAttribute('aria-label') || '',
+      element.getAttribute('title') || '',
+      element.textContent || ''
+    ].join(' ').toLowerCase();
+    return /(copy|share|edit|retry|regenerate|thumb|feedback|menu|report|like|dislike|favorite|bookmark|new chat|历史|复制|分享|重试|重新生成|反馈|菜单)/.test(hint);
+  }
+
+  function looksLikeClaudeFileExpandControl(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const ariaExpanded = (element.getAttribute('aria-expanded') || '').toLowerCase();
+    if (ariaExpanded === 'true') return false;
+
+    const hint = [
+      element.textContent || '',
+      element.getAttribute('aria-label') || '',
+      element.getAttribute('title') || '',
+      element.getAttribute('data-testid') || '',
+      element.className || ''
+    ].join(' ').toLowerCase();
+
+    const expandWords = /(expand|show more|view more|see more|open|open file|show file|view file|view code|show code|show source|more details|更多|展开|显示更多|查看更多|展开代码|查看代码|显示文件)/;
+    const collapseWords = /(collapse|hide|show less|收起|隐藏|折叠)/;
+    if (collapseWords.test(hint)) return false;
+
+    const inFileContext = Boolean(
+      element.closest(
+        'details, [data-testid*="artifact"], [data-testid*="attachment"], [data-testid*="file"], [data-testid*="code"], [class*="artifact"], [class*="attachment"], [class*="file"], [class*="code"], pre, code'
+      )
+    ) || looksLikeClaudeFileContainer(element);
+
+    if (!inFileContext) return false;
+    if (ariaExpanded === 'false') return true;
+    return expandWords.test(hint);
+  }
+
+  async function expandClaudeCollapsedBlocks() {
+    if (SITE_KEY !== SITE_KEYS.claude) return 0;
+    const root = resolveCollectionRoot() || document.querySelector('main') || document.body;
+    if (!root) return 0;
+
+    const messageNodes = dedupeMessageNodes(
+      Array.from(root.querySelectorAll(SELECTORS.MESSAGE_TURN))
+    ).filter((node) => isLikelyMessageNode(node) && isClaudeMessageNodeCandidate(node));
+    if (!messageNodes.length) return 0;
+
+    let expanded = 0;
+    const clickedKeys = new Set();
+
+    for (let pass = 0; pass < 6; pass++) {
+      let passCount = 0;
+
+      messageNodes.forEach((messageNode) => {
+        Array.from(messageNode.querySelectorAll('details:not([open])')).forEach((detailsEl) => {
+          if (!looksLikeClaudeFileContainer(detailsEl) && !detailsEl.querySelector('pre, code, [data-testid*="file"], [data-testid*="artifact"]')) {
+            return;
+          }
+          detailsEl.setAttribute('open', '');
+          passCount += 1;
+        });
+      });
+
+      messageNodes.forEach((messageNode) => {
+        const controls = Array.from(messageNode.querySelectorAll('button, [role="button"], summary'))
+          .filter((el) => el instanceof HTMLElement);
+
+        controls.forEach((control) => {
+          if (!(control instanceof HTMLElement)) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-hint')) return;
+          if (control.matches('[aria-expanded="true"]')) return;
+          if (control instanceof HTMLButtonElement && control.disabled) return;
+          if (isClaudeActionBarControl(control)) return;
+          if (!looksLikeClaudeFileExpandControl(control)) return;
+
+          const rect = control.getBoundingClientRect();
+          if (rect.width < 8 || rect.height < 8) return;
+
+          const key = [
+            control.getAttribute('data-testid') || '',
+            control.getAttribute('aria-label') || '',
+            control.textContent?.trim()?.slice(0, 80) || '',
+            String(Math.round(rect.top)),
+            String(Math.round(rect.left))
+          ].join('|');
+          if (clickedKeys.has(key)) return;
+          clickedKeys.add(key);
+
+          control.click();
+          passCount += 1;
+        });
+      });
+
+      if (!passCount) break;
+      expanded += passCount;
+      await new Promise((resolve) => setTimeout(resolve, 240));
+    }
+
+    return expanded;
+  }
+
+  async function exportSelection() {
+    if (state.exporting) return;
+    let selection = state.turns.filter((t) => state.selectedTurnIds.has(t.id));
+    if (!selection.length) return showToast('请至少选择一条消息');
+
+    state.exporting = true;
+    showToast('正在处理...', 10000);
+
+    try {
+      // 渲染导出需要先懒加载；Claude还需展开折叠代码/文件块。
+      const needsRender = ['pdf', 'screenshot', 'word', 'html'].includes(state.selectedFormat);
+      const shouldExpandClaude = SITE_KEY === SITE_KEYS.claude;
+      if (needsRender || shouldExpandClaude) {
+        const wasAllSelected = state.turns.length > 0
+          && state.selectedTurnIds.size === state.turns.length;
+        if (needsRender) {
+          await autoLoadConversation();
+        }
+        if (shouldExpandClaude) {
+          await expandClaudeCollapsedBlocks();
+        }
+        await refreshConversationData();
+        if (wasAllSelected) {
+          state.selectedTurnIds = new Set(state.turns.map((turn) => turn.id));
+          updateTurnList();
+        }
+      }
+
+      selection = state.turns.filter((t) => state.selectedTurnIds.has(t.id));
+      if (!selection.length) throw new Error('没有可导出的对话轮次');
+
+      const fmt = state.selectedFormat;
+      const ext = EXPORT_FORMATS.find((f) => f.id === fmt)?.ext || 'txt';
+      const fallbackName = SITE_EXPORT_BASENAME;
+      const filename = (state.fileName || state.pageTitle || fallbackName) + `.${ext}`;
+
+      const needsTurnImageResolve = fmt === 'markdown' || fmt === 'json';
+      if (needsTurnImageResolve) {
+        await resolveImages(selection);
+      }
+
+      if (fmt === 'markdown') await exportMarkdown(selection, filename);
+      else if (fmt === 'html') await exportHtml(selection, filename);
+      else if (fmt === 'pdf') await exportPdf(selection, filename);
+      else if (fmt === 'screenshot') await exportScreenshot(selection, filename);
+      else if (fmt === 'text') await exportText(selection, filename);
+      else if (fmt === 'json') await exportJson(selection, filename);
+      else if (fmt === 'word') await exportWord(selection, filename);
+      else if (fmt === 'excel' || fmt === 'csv') await exportTable(selection, filename, fmt);
+    } catch (err) {
+      console.error(err);
+      showToast('导出失败: ' + (err.message || String(err)));
+    } finally {
+      state.exporting = false;
+      showToast('导出流程结束');
+    }
+  }
+
+  async function runWithConcurrency(items, concurrency, worker) {
+    if (!items?.length) return;
+    const limit = Math.max(1, Math.min(concurrency || 1, items.length));
+    let cursor = 0;
+    const runners = Array.from({ length: limit }, async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= items.length) return;
+        await worker(items[index], index);
+      }
+    });
+    await Promise.all(runners);
+  }
+
+  async function resolveImages(turns) {
+    const jobsBySrc = new Map();
+    for (const turn of turns) {
+      if (!turn.images) continue;
+      for (const img of turn.images) {
+        if (img.dataUrl || !img.src) continue;
+        const normalizedSrc = normalizeUrlValue(img.src);
+        const jobKey = normalizedSrc || img.src;
+        if (shouldSkipInliningByUrl(jobKey)) continue;
+        if (!jobsBySrc.has(jobKey)) jobsBySrc.set(jobKey, []);
+        jobsBySrc.get(jobKey).push(img);
+      }
+    }
+
+    await runWithConcurrency(Array.from(jobsBySrc.entries()), 4, async ([src, images]) => {
+      let dataUrl = getCachedImage(src);
+      if (!dataUrl) {
+        try {
+          dataUrl = await fetchImageAsDataUrl(src);
+        } catch (error) {
+          dataUrl = null;
+        }
+      }
+      if (!dataUrl) {
+        console.warn('Image load failed', src);
+        return;
+      }
+      setCachedImage(src, dataUrl);
+      images.forEach((img) => {
+        img.dataUrl = dataUrl;
+      });
+    });
+
+    for (const turn of turns) {
+      if (!turn.images?.length) continue;
+
+      if (turn.markdownResolved) {
+        turn.images.forEach((img) => {
+          if (img.dataUrl && img.index != null) {
+            const token = `${IMAGE_TOKEN_PREFIX}${img.index}${IMAGE_TOKEN_SUFFIX}`;
+            turn.markdownResolved = turn.markdownResolved.split(token).join(img.dataUrl);
+          }
+        });
+      }
+
+      if (turn.html) {
+        turn.images.forEach((img) => {
+          if (img.dataUrl && img.src) {
+            turn.html = turn.html.replace(
+              new RegExp(`src="${escapeRegExp(img.src)}"`, 'g'),
+              `src="${img.dataUrl}"`
+            );
+          }
+        });
+      }
+    }
+  }
+
+  async function fetchImageAsDataUrl(src) {
+    if (!src) return null;
+    if (/^data:/i.test(src)) return src;
+    const cached = getCachedImage(src);
+    if (cached) return cached;
+
+    let dataUrl = null;
+    const normalizedSrc = normalizeUrlValue(src);
+    if (shouldSkipInliningByUrl(normalizedSrc || src)) {
+      return null;
+    }
+
+    const fetchToDataUrl = async (url, options) => {
+      const resp = await fetch(url, options);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status} for ${url}`);
+      }
+      const blob = await resp.blob();
+      const reader = new FileReader();
+      return await new Promise((resolve) => {
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(blob);
+      });
+    };
+
+    if (/^blob:/i.test(src)) {
+      const blobResp = await fetch(src);
+      const blobData = await blobResp.blob();
+      const reader = new FileReader();
+      dataUrl = await new Promise((resolve) => {
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(blobData);
+      });
+      if (dataUrl) setCachedImage(src, dataUrl);
+      return dataUrl;
+    }
+
+    try {
+      dataUrl = await fetchToDataUrl(normalizedSrc, {
+        credentials: 'include',
+        mode: 'cors',
+        cache: 'no-store'
+      });
+    } catch (error) {
+      dataUrl = null;
+    }
+
+    // 优先通过 Service Worker 拉取，减少页面侧 CORS 失败概率
+    if (!dataUrl && chrome?.runtime?.id) {
+      try {
+        const response = await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage(
+            {
+              type: 'CED_FETCH_AS_DATAURL',
+              url: normalizedSrc
+            },
+            (resp) => {
+              if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+              else resolve(resp);
+            }
+          );
+        });
+        if (response?.ok && response?.dataUrl) {
+          dataUrl = response.dataUrl;
+        }
+      } catch (error) {
+        dataUrl = null;
+      }
+    }
+
+    if (!dataUrl) {
+      dataUrl = await fetchToDataUrl(normalizedSrc, {
+        credentials: 'omit',
+        mode: 'cors',
+        cache: 'no-store'
+      });
+    }
+
+    if (dataUrl) setCachedImage(src, dataUrl);
+    return dataUrl;
+  }
+
+  function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function normalizeUrlValue(value) {
+    if (!value) return '';
+    try {
+      return new URL(value, window.location.href).href;
+    } catch (error) {
+      return value;
+    }
+  }
+
+  function shouldSkipInliningByUrl(value) {
+    if (!value) return false;
+    const normalized = normalizeUrlValue(value);
+    if (!normalized || /^data:/i.test(normalized) || /^blob:/i.test(normalized)) {
+      return false;
+    }
+    try {
+      const parsed = new URL(normalized);
+      const host = parsed.hostname.toLowerCase();
+      const path = parsed.pathname || '';
+      if ((host === 'www.google.com' || host.endsWith('.google.com')) && path.startsWith('/s2/favicons')) {
+        return true;
+      }
+    } catch (error) {
+      return false;
+    }
+    return false;
+  }
+
+  function shouldSkipInliningForImageElement(img) {
+    if (!(img instanceof HTMLImageElement)) return false;
+    if (img.closest('.citation, .source-citation, [data-testid*="citation"]')) return true;
+    const width = img.naturalWidth || img.width || 0;
+    const height = img.naturalHeight || img.height || 0;
+    if (width > 0 && height > 0 && width <= 48 && height <= 48) {
+      return true;
+    }
+    const candidates = [img.getAttribute('src'), img.currentSrc, img.src].filter(Boolean);
+    return candidates.some((src) => shouldSkipInliningByUrl(src));
+  }
+
+  function getCachedImage(src) {
+    if (!src) return null;
+    const normalized = normalizeUrlValue(src);
+    return state.imageCache.get(src) || state.imageCache.get(normalized) || null;
+  }
+
+  function setCachedImage(src, dataUrl) {
+    if (!src || !dataUrl) return;
+    state.imageCache.set(src, dataUrl);
+    const normalized = normalizeUrlValue(src);
+    if (normalized && normalized !== src) {
+      state.imageCache.set(normalized, dataUrl);
+    }
+  }
+
+  function queryFirst(selectors) {
+    for (const selector of selectors || []) {
+      const element = document.querySelector(selector);
+      if (element) return element;
+    }
+    return null;
+  }
+
+  function sortNodesInDocumentOrder(nodes) {
+    return Array.from(nodes || []).sort((a, b) => {
+      if (a === b) return 0;
+      const position = a.compareDocumentPosition(b);
+      if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      return 0;
+    });
+  }
+
+  function dedupeMessageNodes(nodes) {
+    const ordered = sortNodesInDocumentOrder(
+      Array.from(nodes || []).filter((node) => node instanceof HTMLElement)
+    );
+    const kept = [];
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const node = ordered[i];
+      if (kept.some((existing) => node.contains(existing))) {
+        continue;
+      }
+      if (kept.some((existing) => existing === node)) {
+        continue;
+      }
+      kept.push(node);
+    }
+    return sortNodesInDocumentOrder(kept);
+  }
+
+  function gatherConversationRootCandidates(referenceNode, turnNodes = []) {
+    const candidates = [];
+    const seen = new Set();
+    const addCandidate = (element) => {
+      if (!(element instanceof HTMLElement)) return;
+      if (seen.has(element)) return;
+      seen.add(element);
+      candidates.push(element);
+    };
+
+    const allTurnNodes = Array.from(turnNodes || []).filter((node) => node instanceof HTMLElement);
+    const seedNodes = [referenceNode, ...allTurnNodes].filter((node) => node instanceof HTMLElement);
+
+    seedNodes.forEach((seed) => {
+      CONVERSATION_ROOT_SELECTORS.forEach((selector) => {
+        addCandidate(seed.closest(selector));
+      });
+    });
+
+    CONVERSATION_ROOT_SELECTORS.forEach((selector) => {
+      Array.from(document.querySelectorAll(selector)).slice(0, 8).forEach(addCandidate);
+    });
+
+    addCandidate(queryFirst(CONVERSATION_ROOT_SELECTORS));
+    addCandidate(document.querySelector('main'));
+    addCandidate(document.body);
+    addCandidate(referenceNode?.parentElement);
+    return candidates;
+  }
+
+  function scoreConversationRootCandidate(root, turnNodes = []) {
+    if (!(root instanceof HTMLElement)) return -Infinity;
+    const rect = root.getBoundingClientRect();
+    const area = Math.max(0, rect.width * rect.height);
+    const visible = area > 100 ? 1 : 0;
+    const turnCount = turnNodes.length
+      ? turnNodes.filter((turnNode) => root.contains(turnNode)).length
+      : root.querySelectorAll(SELECTORS.MESSAGE_TURN).length;
+    const textLength = (root.innerText || '').trim().length;
+    return (turnCount * 1_000_000) + (visible * 100_000) + area + Math.min(textLength, 50_000);
+  }
+
+  function findConversationRoot(node, turnNodes = []) {
+    if (!node) return null;
+    const candidates = gatherConversationRootCandidates(node, turnNodes);
+    if (!candidates.length) {
+      return queryFirst(CONVERSATION_ROOT_SELECTORS) || node.parentElement;
+    }
+    let best = candidates[0];
+    let bestScore = scoreConversationRootCandidate(best, turnNodes);
+    for (let i = 1; i < candidates.length; i++) {
+      const score = scoreConversationRootCandidate(candidates[i], turnNodes);
+      if (score > bestScore) {
+        best = candidates[i];
+        bestScore = score;
+      }
+    }
+    return best || queryFirst(CONVERSATION_ROOT_SELECTORS) || node.parentElement;
+  }
+
+  function resolveCollectionRoot() {
+    const sampledTurns = dedupeMessageNodes(
+      Array.from(document.querySelectorAll(SELECTORS.MESSAGE_TURN)).filter(isLikelyMessageNode)
+    ).slice(0, 300);
+    if (sampledTurns.length) {
+      return findConversationRoot(sampledTurns[0], sampledTurns);
+    }
+    return queryFirst(CONVERSATION_ROOT_SELECTORS) || document.querySelector('main') || document.body;
+  }
+
+  function serializeElementAttributes(element) {
+    if (!(element instanceof Element)) return '';
+    return Array.from(element.attributes || [])
+      .map((attr) => `${attr.name}="${escapeHtml(attr.value)}"`)
+      .join(' ');
+  }
+
+  function stripComposerAndFixedOverlays(root) {
+    if (!root) return;
+    const removable = new Set();
+    const addIfSafe = (node) => {
+      if (!(node instanceof HTMLElement)) return;
+      if (node === root) return;
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-hint')) {
+        removable.add(node);
+        return;
+      }
+      if (node.matches(SELECTORS.MESSAGE_TURN) || node.querySelector(SELECTORS.MESSAGE_TURN)) return;
+      removable.add(node);
+    };
+
+    const inputLikeSelectors = [
+      'textarea',
+      '[role="textbox"]',
+      '[contenteditable="true"]',
+      'input[type="text"]',
+      'input[type="search"]'
+    ];
+    root.querySelectorAll(inputLikeSelectors.join(',')).forEach((inputEl) => {
+      if (!(inputEl instanceof HTMLElement)) return;
+      const container = inputEl.closest(
+        '[data-testid*="composer"], [data-testid*="chat-input"], [data-testid*="message-input"], [class*="composer"], [class*="chat-input"], form, footer'
+      );
+      addIfSafe(container || inputEl);
+    });
+
+    const knownOverlaySelectors = [
+      '[data-testid*="composer"]',
+      '[data-testid*="chat-input"]',
+      '[data-testid*="message-input"]',
+      '[class*="composer"]',
+      '[class*="chat-input"]'
+    ];
+    knownOverlaySelectors.forEach((selector) => {
+      root.querySelectorAll(selector).forEach(addIfSafe);
+    });
+
+    removable.forEach((node) => node.remove());
+  }
+
+  function buildExportSnapshotRoot(turns, options = {}) {
+    if (!turns?.length) return null;
+    const includeAllTurns = options.includeAllTurns === true;
+    const turnNodes = turns.map((turn) => turn.node).filter((node) => node instanceof HTMLElement);
+    const sourceRoot = turnNodes[0] ? findConversationRoot(turnNodes[0], turnNodes) : null;
+    if (!sourceRoot) return null;
+
+    const selectedIdSet = new Set(turns.map((turn) => turn.id));
+    const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
+    const clonedRoot = sourceRoot.cloneNode(true);
+
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-hint'].forEach((selector) => {
+      clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
+    });
+    clonedRoot.querySelectorAll('.ced-latex-copy-target').forEach((el) => {
+      el.classList.remove('ced-latex-copy-target');
+      el.removeAttribute('role');
+      el.removeAttribute('tabindex');
+      el.removeAttribute('title');
+      el.removeAttribute('aria-label');
+      delete el.dataset.cedLatex;
+    });
+
+    const clonedTurns = Array.from(clonedRoot.querySelectorAll(SELECTORS.MESSAGE_TURN));
+    clonedTurns.forEach((clonedTurn) => {
+      const id = clonedTurn.dataset.cedMessageId;
+      if (!includeAllTurns && id && !selectedIdSet.has(id)) {
+        clonedTurn.remove();
+        return;
+      }
+
+      const sourceTurn = sourceTurnMap.get(id);
+      if (sourceTurn) {
+        staticizeDynamicContent(sourceTurn, clonedTurn);
+      }
+    });
+
+    stripComposerAndFixedOverlays(clonedRoot);
+    return clonedRoot;
+  }
+
+  async function buildFullHtmlDocument(turns, options = {}) {
+    const includeAllTurns = options.includeAllTurns !== false;
+    const sourceTurns = includeAllTurns && state.turns.length ? state.turns : turns;
+    const snapshotRoot = buildExportSnapshotRoot(sourceTurns, { includeAllTurns });
+    if (!snapshotRoot) return '';
+    await hydrateSnapshotImages(snapshotRoot, sourceTurns);
+    applyCachedImagesToRoot(snapshotRoot, sourceTurns);
+    const headClone = document.head.cloneNode(true);
+    headClone.querySelectorAll('script').forEach((el) => el.remove());
+    const titleEl = headClone.querySelector('title') || headClone.appendChild(document.createElement('title'));
+    titleEl.textContent = state.pageTitle || ACTIVE_SITE.defaultTitle;
+    const htmlAttrs = serializeElementAttributes(document.documentElement);
+    const bodyAttrs = serializeElementAttributes(document.body);
+    const bodyBg = sanitizeStyleString(window.getComputedStyle(document.body).backgroundColor) || '#ffffff';
+    enhanceDarkCodeContrast(snapshotRoot, bodyBg);
+
+    return `<!DOCTYPE html>
+<html ${htmlAttrs}>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<base href="${escapeHtml(location.origin + '/')}">
+${headClone.innerHTML}
+<style>
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-hint {
+    display: none !important;
+  }
+  [data-testid*="composer"],
+  [data-testid*="chat-input"],
+  [data-testid*="message-input"],
+  [class*="composer"],
+  [class*="chat-input"] {
+    display: none !important;
+  }
+</style>
+</head>
+<body ${bodyAttrs}>
+${snapshotRoot.outerHTML}
+</body>
+</html>`;
+  }
+
+  function prepareSnapshotForRender(root) {
+    if (!root) return;
+    const elements = [root, ...Array.from(root.querySelectorAll('*'))];
+    elements.forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      el.style.setProperty('content-visibility', 'visible', 'important');
+      const computed = window.getComputedStyle(el);
+      const containValue = computed.contain;
+      if (containValue && containValue !== 'none') {
+        el.style.setProperty('contain', 'none', 'important');
+      }
+      if (computed.position === 'sticky') {
+        el.style.position = 'static';
+      }
+    });
+  }
+
+  function applyCachedImagesToRoot(root, turns) {
+    if (!root) return;
+    const urlToData = new Map();
+    (turns || []).forEach((turn) => {
+      (turn.images || []).forEach((img) => {
+        if (img?.src && img?.dataUrl) {
+          urlToData.set(img.src, img.dataUrl);
+          const normalized = normalizeUrlValue(img.src);
+          if (normalized) urlToData.set(normalized, img.dataUrl);
+        }
+      });
+    });
+    for (const [key, value] of state.imageCache.entries()) {
+      if (!urlToData.has(key)) urlToData.set(key, value);
+      const normalizedKey = normalizeUrlValue(key);
+      if (normalizedKey && !urlToData.has(normalizedKey)) {
+        urlToData.set(normalizedKey, value);
+      }
+    }
+
+    Array.from(root.querySelectorAll('img')).forEach((img) => {
+      const candidates = [img.getAttribute('src'), img.currentSrc, img.src]
+        .filter(Boolean)
+        .flatMap((src) => [src, normalizeUrlValue(src)]);
+      for (const src of candidates) {
+        const dataUrl = urlToData.get(src);
+        if (dataUrl) {
+          img.removeAttribute('srcset');
+          img.src = dataUrl;
+          break;
+        }
+      }
+    });
+  }
+
+  // Normalize modern CSS colors before canvas rendering.
+
+  const colorConversionCache = new Map();
+  let sharedConverterEl = null;
+
+  function getRgbFromSingleColorString(colorVal) {
+    if (!colorVal || typeof colorVal !== 'string') return colorVal;
+    if (colorConversionCache.has(colorVal)) {
+      return colorConversionCache.get(colorVal);
+    }
+
+    if (!sharedConverterEl) {
+      sharedConverterEl = document.createElement('div');
+      sharedConverterEl.style.cssText = 'display:none !important; color:transparent !important;';
+      (document.body || document.documentElement).appendChild(sharedConverterEl);
+    }
+
+    try {
+      sharedConverterEl.style.color = '';
+      sharedConverterEl.style.color = colorVal;
+
+      if (sharedConverterEl.style.color) {
+        const computed = window.getComputedStyle(sharedConverterEl).color;
+        if (computed && !computed.match(/\b(oklch|oklab|lch|lab)\b/i)) {
+          colorConversionCache.set(colorVal, computed);
+          return computed;
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    return colorVal;
+  }
+
+  function sanitizeStyleString(str) {
+    if (!str || typeof str !== 'string') return str;
+    const MODERN_COLOR_REGEX = /\b(?:oklch|oklab|lch|lab|color)\s*\([^)]+\)/gi;
+
+    if (!MODERN_COLOR_REGEX.test(str)) return str;
+
+    return str.replace(MODERN_COLOR_REGEX, (match) => getRgbFromSingleColorString(match));
+  }
+
+  function sanitizeModernColors(rootElement) {
+    const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_ELEMENT);
+    const propsToCheck = [
+      'color', 'backgroundColor', 'borderColor',
+      'borderTopColor', 'borderBottomColor', 'borderLeftColor', 'borderRightColor',
+      'outlineColor', 'textDecorationColor', 'fill', 'stroke', 'stopColor', 'floodColor',
+      'boxShadow', 'backgroundImage', 'background'
+    ];
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const computed = window.getComputedStyle(node);
+
+      propsToCheck.forEach((prop) => {
+        const val = computed[prop];
+        if (val && val.match(/\b(oklch|oklab|lch|lab)\b/i)) {
+          node.style[prop] = sanitizeStyleString(val);
+        }
+      });
+
+      if (node instanceof SVGElement) {
+        const fill = computed.fill;
+        if (fill && fill.match(/\b(oklch|oklab|lch|lab)\b/i)) {
+          node.style.fill = getRgbFromSingleColorString(fill);
+        }
+        const stroke = computed.stroke;
+        if (stroke && stroke.match(/\b(oklch|oklab|lch|lab)\b/i)) {
+          node.style.stroke = getRgbFromSingleColorString(stroke);
+        }
+      }
+    }
+  }
+
+  function parseHexColor(input) {
+    const hex = (input || '').trim();
+    if (!/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex)) return null;
+    const normalized = hex.length === 4
+      ? `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`
+      : hex;
+    return [
+      parseInt(normalized.slice(1, 3), 16),
+      parseInt(normalized.slice(3, 5), 16),
+      parseInt(normalized.slice(5, 7), 16)
+    ];
+  }
+
+  function colorStringToRgbTuple(colorVal, fallback = [255, 255, 255]) {
+    if (!colorVal || typeof colorVal !== 'string') return fallback;
+    const hexTuple = parseHexColor(colorVal);
+    if (hexTuple) return hexTuple;
+
+    const normalized = getRgbFromSingleColorString(colorVal) || colorVal;
+    const rgbMatch = normalized.match(/rgba?\(([^)]+)\)/i);
+    if (!rgbMatch) return fallback;
+    const parts = rgbMatch[1]
+      .split(',')
+      .slice(0, 3)
+      .map((part) => Math.round(parseFloat(part.trim())));
+    if (parts.length !== 3 || parts.some((num) => !Number.isFinite(num))) return fallback;
+    return parts.map((num) => Math.max(0, Math.min(255, num)));
+  }
+
+  function isTransparentColor(colorVal) {
+    if (!colorVal) return true;
+    const normalized = (colorVal || '').trim().toLowerCase();
+    if (normalized === 'transparent') return true;
+    const match = normalized.match(/rgba\(([^)]+)\)/);
+    if (!match) return false;
+    const alpha = parseFloat(match[1].split(',')[3] || '1');
+    return Number.isFinite(alpha) && alpha < 0.02;
+  }
+
+  function getRelativeLuminance(rgb) {
+    const toLinear = (channel) => {
+      const value = channel / 255;
+      return value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+    };
+    const [r, g, b] = rgb.map(toLinear);
+    return (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+  }
+
+  function getContrastRatio(aRgb, bRgb) {
+    const l1 = getRelativeLuminance(aRgb);
+    const l2 = getRelativeLuminance(bRgb);
+    const lighter = Math.max(l1, l2);
+    const darker = Math.min(l1, l2);
+    return (lighter + 0.05) / (darker + 0.05);
+  }
+
+  function isDarkColor(rgb) {
+    const [r, g, b] = rgb;
+    const brightness = ((r * 299) + (g * 587) + (b * 114)) / 1000;
+    return brightness < 140;
+  }
+
+  function enhanceDarkCodeContrast(root, bgColor) {
+    if (!root || SITE_KEY !== SITE_KEYS.claude) return;
+    const pageBg = colorStringToRgbTuple(bgColor, [255, 255, 255]);
+    if (!isDarkColor(pageBg)) return;
+
+    const codeNodes = Array.from(root.querySelectorAll('pre, code'));
+    codeNodes.forEach((node) => {
+      if (!(node instanceof HTMLElement)) return;
+      const computed = window.getComputedStyle(node);
+      const textRgb = colorStringToRgbTuple(computed.color, [230, 237, 243]);
+      const bgRgb = isTransparentColor(computed.backgroundColor)
+        ? pageBg
+        : colorStringToRgbTuple(computed.backgroundColor, pageBg);
+      const ratio = getContrastRatio(textRgb, bgRgb);
+      const inPre = node.tagName === 'PRE' || node.closest('pre');
+
+      if (ratio < 4.5) {
+        node.style.setProperty('color', '#e6edf3', 'important');
+      }
+      if (node.tagName === 'PRE' && (ratio < 4.5 || isTransparentColor(computed.backgroundColor))) {
+        node.style.setProperty('background', '#111827', 'important');
+        node.style.setProperty('border-radius', '10px', 'important');
+      } else if (node.tagName === 'CODE' && !inPre) {
+        node.style.setProperty('background', 'rgba(148, 163, 184, 0.16)', 'important');
+        node.style.setProperty('padding', '0.12em 0.34em', 'important');
+        node.style.setProperty('border-radius', '6px', 'important');
+      }
+    });
+  }
+
+  async function renderConversationCanvas(turns, options = {}) {
+    const exportTurns = Array.isArray(turns) && turns.length
+      ? turns
+      : state.turns.filter((t) => state.selectedTurnIds.has(t.id));
+    if (!exportTurns.length) throw new Error('未找到聊天内容');
+
+    const html2canvasImpl = resolveHtml2canvas();
+    if (!html2canvasImpl) throw new Error('html2canvas 未加载');
+
+    const visualTurns = state.turns.length ? state.turns : exportTurns;
+    const snapshotNode = buildExportSnapshotRoot(visualTurns, { includeAllTurns: true });
+    if (!snapshotNode) {
+      throw new Error('未找到可导出的会话容器');
+    }
+    const visualTurnNodes = visualTurns.map((turn) => turn.node).filter((node) => node instanceof HTMLElement);
+    const sourceRoot = visualTurnNodes[0] ? findConversationRoot(visualTurnNodes[0], visualTurnNodes) : null;
+    const measuredWidth = Math.ceil(sourceRoot?.getBoundingClientRect()?.width || snapshotNode.scrollWidth || (window.innerWidth || 1280) - 40);
+    const width = Math.max(360, Math.min(1400, measuredWidth));
+    const bodyStyle = window.getComputedStyle(document.body);
+    const bgColor = sanitizeStyleString(bodyStyle.backgroundColor) || '#ffffff';
+
+    const host = document.createElement('div');
+    host.style.cssText = [
+      'position:absolute',
+      'left:-99999px',
+      'top:0',
+      `width:${width}px`,
+      'overflow:visible',
+      'pointer-events:none',
+      `background:${bgColor}`
+    ].join(';');
+    host.appendChild(snapshotNode);
+    document.body.appendChild(host);
+
+    try {
+      applyCachedImagesToRoot(snapshotNode, visualTurns);
+      await hydrateSnapshotImages(snapshotNode, visualTurns);
+      prepareSnapshotForRender(snapshotNode);
+      fixTextLayoutForCanvas(snapshotNode);
+      sanitizeModernColors(snapshotNode);
+      enhanceDarkCodeContrast(snapshotNode, bgColor);
+      await waitForImages(snapshotNode);
+      if (document.fonts?.ready) {
+        try {
+          await document.fonts.ready;
+        } catch (e) { }
+      }
+
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const linkRects = collectLinkRectsFromContainer(snapshotNode);
+      const contentWidthPx = Math.max(snapshotNode.scrollWidth || 0, width);
+      const contentHeightPx = Math.max(
+        snapshotNode.scrollHeight || 0,
+        Math.ceil(snapshotNode.getBoundingClientRect().height || 0),
+        Math.ceil(sourceRoot?.scrollHeight || 0)
+      );
+      let renderHeightPx = contentHeightPx;
+      if (renderHeightPx < 40) {
+        const hostHeight = Math.ceil(host.getBoundingClientRect().height || 0);
+        const hostScrollHeight = Math.ceil(host.scrollHeight || 0);
+        const estimatedByTurns = Math.max(360, visualTurns.length * 140);
+        renderHeightPx = Math.max(renderHeightPx, hostHeight, hostScrollHeight, estimatedByTurns);
+        console.warn('[Chat Exporter] Conversation height too small, using fallback render height:', renderHeightPx);
+      }
+      const renderTarget = options?.target || 'default';
+      const estimatedPixels = width * Math.max(renderHeightPx, 1);
+      let scaleCap = 2;
+      if (renderTarget === 'pdf') {
+        scaleCap = 1.35;
+        if (estimatedPixels > 30_000_000) scaleCap = 1.2;
+        if (estimatedPixels > 55_000_000) scaleCap = 1.0;
+      }
+      const deviceScale = window.devicePixelRatio || 1;
+      const scale = Math.max(1, Math.min(deviceScale, scaleCap));
+
+      let canvas;
+      try {
+        canvas = await html2canvasImpl(snapshotNode, {
+          scale,
+          useCORS: true,
+          allowTaint: true,
+          foreignObjectRendering: false,
+          backgroundColor: bgColor,
+          logging: false,
+          windowWidth: width,
+          windowHeight: renderHeightPx,
+          onclone: (clonedDoc) => {
+            clonedDoc.body.style.backgroundColor = bgColor;
+            try {
+              stripUnsupportedColorFunctions(clonedDoc);
+            } catch (error) {
+              console.warn('[Chat Exporter] stripUnsupportedColorFunctions failed', error);
+            }
+          },
+          ignoreElements: (element) => element.classList.contains('ced-ignore')
+        });
+      } catch (html2canvasError) {
+        console.warn('[Chat Exporter] html2canvas failed, trying foreignObject fallback:', html2canvasError.message);
+        canvas = await renderWithForeignObject(snapshotNode, width, renderHeightPx, scale, bgColor);
+      }
+
+      return { canvas, linkRects, contentWidthPx, bgColor };
+    } finally {
+      if (host.parentNode) {
+        host.parentNode.removeChild(host);
+      }
+      if (sharedConverterEl && sharedConverterEl.parentNode) {
+        sharedConverterEl.parentNode.removeChild(sharedConverterEl);
+        sharedConverterEl = null;
+      }
+    }
+  }
+
+  async function hydrateSnapshotImages(root, turns) {
+    if (!root) return;
+    const imgs = Array.from(root.querySelectorAll('img'));
+    if (!imgs.length) return;
+
+    const urlToData = new Map();
+    turns.forEach((turn) => {
+      (turn.images || []).forEach((img) => {
+        if (img?.src && img?.dataUrl) {
+          urlToData.set(img.src, img.dataUrl);
+          const normalized = normalizeUrlValue(img.src);
+          if (normalized) urlToData.set(normalized, img.dataUrl);
+        }
+      });
+    });
+    for (const [key, value] of state.imageCache.entries()) {
+      if (!urlToData.has(key)) urlToData.set(key, value);
+      const normalizedKey = normalizeUrlValue(key);
+      if (normalizedKey && !urlToData.has(normalizedKey)) {
+        urlToData.set(normalizedKey, value);
+      }
+    }
+
+    const pendingBySrc = new Map();
+    const unresolved = [];
+
+    for (const img of imgs) {
+      if (shouldSkipInliningForImageElement(img)) {
+        continue;
+      }
+      const candidates = [img.getAttribute('src'), img.currentSrc, img.src]
+        .filter(Boolean)
+        .flatMap((src) => [src, normalizeUrlValue(src)]);
+      let dataUrl = null;
+      for (const src of candidates) {
+        dataUrl = urlToData.get(src) || getCachedImage(src) || null;
+        if (dataUrl) break;
+      }
+      if (dataUrl) {
+        img.removeAttribute('srcset');
+        img.src = dataUrl;
+        continue;
+      }
+
+      unresolved.push({ img, candidates });
+
+      if (!dataUrl) {
+        const remoteSrc = candidates.find((src) => /^https?:/i.test(src));
+        if (remoteSrc) {
+          const key = normalizeUrlValue(remoteSrc) || remoteSrc;
+          if (!pendingBySrc.has(key)) pendingBySrc.set(key, []);
+          pendingBySrc.get(key).push(img);
+        }
+      }
+    }
+
+    await runWithConcurrency(Array.from(pendingBySrc.entries()), 4, async ([src, nodes]) => {
+      let dataUrl = urlToData.get(src) || getCachedImage(src) || null;
+      if (!dataUrl) {
+        try {
+          dataUrl = await fetchImageAsDataUrl(src);
+        } catch (error) {
+          dataUrl = null;
+        }
+      }
+      if (!dataUrl) return;
+      const normalized = normalizeUrlValue(src);
+      urlToData.set(src, dataUrl);
+      if (normalized) urlToData.set(normalized, dataUrl);
+      setCachedImage(src, dataUrl);
+      nodes.forEach((node) => {
+        node.removeAttribute('srcset');
+        node.src = dataUrl;
+      });
+    });
+
+    unresolved.forEach(({ img, candidates }) => {
+      if (img.src?.startsWith('data:')) return;
+      const dataUrl = candidates
+        .map((src) => urlToData.get(src) || getCachedImage(src))
+        .find(Boolean);
+      if (dataUrl) {
+        img.removeAttribute('srcset');
+        img.src = dataUrl;
+      }
+    });
+  }
+
+  function collectLinkRectsFromContainer(container) {
+    if (!container) return [];
+    const rootRect = container.getBoundingClientRect();
+    return Array.from(container.querySelectorAll('a[href]'))
+      .map((anchor) => {
+        const rect = anchor.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        return {
+          href: anchor.href,
+          left: rect.left - rootRect.left,
+          top: rect.top - rootRect.top,
+          width: rect.width,
+          height: rect.height
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function findHorizontalContentBounds(container, fallbackWidth) {
+    if (!container) return null;
+    const totalWidth = Math.max(1, Math.ceil(fallbackWidth || container.scrollWidth || container.getBoundingClientRect().width || 1));
+    const rootRect = container.getBoundingClientRect();
+    const turnNodes = dedupeMessageNodes(Array.from(container.querySelectorAll(SELECTORS.MESSAGE_TURN)));
+    if (!turnNodes.length) {
+      return { left: 0, width: totalWidth, right: totalWidth };
+    }
+
+    let minLeft = Infinity;
+    let maxRight = -Infinity;
+    turnNodes.forEach((turn) => {
+      const candidates = [];
+      const aiNode = SELECTORS.AI_CONTENT ? turn.querySelector(SELECTORS.AI_CONTENT) : null;
+      const userNode = SELECTORS.USER_CONTENT ? turn.querySelector(SELECTORS.USER_CONTENT) : null;
+      if (aiNode) candidates.push(aiNode);
+      if (userNode && userNode !== aiNode) candidates.push(userNode);
+      if (!candidates.length) candidates.push(turn);
+
+      candidates.forEach((node) => {
+        const rect = node.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        minLeft = Math.min(minLeft, rect.left - rootRect.left);
+        maxRight = Math.max(maxRight, rect.right - rootRect.left);
+      });
+    });
+
+    if (!Number.isFinite(minLeft) || !Number.isFinite(maxRight)) {
+      return { left: 0, width: totalWidth, right: totalWidth };
+    }
+
+    const paddingPx = 24;
+    const left = Math.max(0, Math.floor(minLeft - paddingPx));
+    const right = Math.min(totalWidth, Math.ceil(maxRight + paddingPx));
+    const width = Math.max(1, right - left);
+    return { left, width, right };
+  }
+
+  function cropCanvasHorizontally(canvas, cropLeftPx, cropWidthPx, totalWidthPx) {
+    if (!canvas || !cropWidthPx || !totalWidthPx) return null;
+    const scale = canvas.width / Math.max(1, totalWidthPx);
+    const sx = Math.max(0, Math.floor(cropLeftPx * scale));
+    const sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil(cropWidthPx * scale)));
+    if (sw >= canvas.width) return canvas;
+
+    const cropped = document.createElement('canvas');
+    cropped.width = sw;
+    cropped.height = canvas.height;
+    const ctx = cropped.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(canvas, sx, 0, sw, canvas.height, 0, 0, sw, canvas.height);
+    return cropped;
+  }
+
+  // 修复文字布局，防止 html2canvas 渲染时文字重叠
+  function fixTextLayoutForCanvas(root) {
+    if (!root) return;
+
+    root.querySelectorAll('*').forEach((el) => {
+      if (el instanceof HTMLElement) {
+        el.style.transition = 'none';
+        el.style.animation = 'none';
+      }
+    });
+  }
+
+  // 增强版 WaitForImages: 处理 lazy loading 和 srcset
+  async function waitForImages(root) {
+    const imgs = Array.from(root.querySelectorAll('img'));
+    const promises = imgs.map(img => {
+      // 强制改为 eager
+      img.setAttribute('loading', 'eager');
+      // 如果是 SVG 占位符或极小图片，直接跳过
+      if (img.naturalWidth > 0 && img.complete) return Promise.resolve();
+
+      return new Promise(resolve => {
+        // 设置超时，防止永久卡住
+        const timer = setTimeout(() => resolve(), 4000);
+
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+
+        img.onload = done;
+        img.onerror = done;
+
+        // 重新赋值 src 以触发浏览器加载逻辑 (针对某些懒加载实现)
+        const src = img.getAttribute('src');
+        if (src) img.src = src;
+        // 如果有 srcset 也尝试触发
+        if (img.srcset) img.srcset = img.srcset;
+      });
+    });
+
+    await Promise.all(promises);
+  }
+
+  // 备选渲染方法：使用SVG foreignObject
+  async function renderWithForeignObject(element, width, height, scale, bgColor) {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(width * scale);
+    canvas.height = Math.floor(height * scale);
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+      throw new Error('无法创建Canvas上下文');
+    }
+
+    ctx.scale(scale, scale);
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, width, height);
+
+    // 克隆元素并内联所有样式
+    const clone = element.cloneNode(true);
+    inlineAllStyles(clone);
+
+    // 创建SVG foreignObject
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('xmlns', svgNS);
+
+    const foreignObject = document.createElementNS(svgNS, 'foreignObject');
+    foreignObject.setAttribute('width', '100%');
+    foreignObject.setAttribute('height', '100%');
+    foreignObject.setAttribute('x', '0');
+    foreignObject.setAttribute('y', '0');
+
+    // 包装克隆的元素
+    const wrapper = document.createElement('div');
+    wrapper.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+    wrapper.style.cssText = `width: ${width}px; height: ${height}px; background: ${bgColor};`;
+    wrapper.appendChild(clone);
+    foreignObject.appendChild(wrapper);
+    svg.appendChild(foreignObject);
+
+    // 序列化SVG
+    const serializer = new XMLSerializer();
+    const svgString = serializer.serializeToString(svg);
+    const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+        resolve(canvas);
+      };
+      img.onerror = (err) => {
+        URL.revokeObjectURL(url);
+        // 如果foreignObject也失败，返回一个带有错误信息的canvas
+        ctx.fillStyle = bgColor || '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = '#ff0000';
+        ctx.font = '16px sans-serif';
+        ctx.fillText('渲染失败：浏览器安全策略限制', 20, 50);
+        ctx.fillText('请尝试使用Edge浏览器或其他导出格式', 20, 80);
+        resolve(canvas);
+      };
+      img.src = url;
+    });
+  }
+
+  // 内联所有计算样式
+  function inlineAllStyles(element) {
+    if (!(element instanceof HTMLElement)) return;
+
+    const computed = window.getComputedStyle(element);
+    const importantStyles = [
+      'color', 'background-color', 'background', 'font-family', 'font-size',
+      'font-weight', 'font-style', 'line-height', 'text-align', 'text-decoration',
+      'padding', 'margin', 'border', 'display', 'width', 'height', 'max-width',
+      'white-space', 'word-break', 'overflow-wrap'
+    ];
+
+    importantStyles.forEach(prop => {
+      const value = computed.getPropertyValue(prop);
+      if (value) {
+        element.style.setProperty(prop, sanitizeStyleString(value));
+      }
+    });
+
+    // 递归处理子元素
+    Array.from(element.children).forEach(child => inlineAllStyles(child));
+  }
+
+  // --- 各导出实现 ---
+
+  async function exportMarkdown(turns, filename) {
+    let content = `# ${state.pageTitle || 'Conversation'}\n\n`;
+    turns.forEach((turn) => {
+      content += `### ${formatRole(turn.role)}\n\n`;
+      content += `${turn.markdownResolved}\n\n`;
+      if (turn.attachments?.length) {
+        content += `**附件**:\n${turn.attachments.map((a) => `- [${a.text}](${a.href})`).join('\n')}\n\n`;
+      }
+      content += `---\n\n`;
+    });
+    await downloadFile(content, filename, 'text/markdown');
+  }
+
+  async function exportText(turns, filename) {
+    const content = turns
+      .map((t) => `${formatRole(t.role)}:\n\n${t.text}\n`)
+      .join('\n----------------\n\n');
+    await downloadFile(content, filename, 'text/plain');
+  }
+
+  async function exportJson(turns, filename) {
+    const data = {
+      title: state.pageTitle,
+      date: new Date().toISOString(),
+      turns: turns.map((t) => ({
+        role: t.role,
+        roleName: formatRole(t.role),
+        text: t.text,
+        markdown: t.markdownResolved,
+        html: t.html
+      }))
+    };
+    await downloadFile(JSON.stringify(data, null, 2), filename, 'application/json');
+  }
+
+  async function exportHtml(turns, filename) {
+    if (!turns?.length) {
+      showToast('未找到可导出的聊天内容');
+      return;
+    }
+    const html = await buildFullHtmlDocument(turns, { includeAllTurns: true });
+    if (!html?.trim()) {
+      throw new Error('未生成可导出的 HTML 内容');
+    }
+    await downloadFile(html, filename, 'text/html');
+  }
+
+  async function exportWord(turns, filename) {
+    if (!turns?.length) {
+      showToast('未找到可导出的聊天内容');
+      return;
+    }
+    const html = await buildFullHtmlDocument(turns, { includeAllTurns: true });
+    if (!html?.trim()) {
+      throw new Error('未生成可导出的 HTML 内容');
+    }
+    const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
+    await downloadBlob(blob, filename);
+  }
+
+  async function exportScreenshot(turns, filename) {
+    const visualTurns = state.turns.length ? state.turns : turns;
+    const renderResult = await renderConversationCanvas(visualTurns);
+    const canvas = renderResult?.canvas;
+    if (!canvas) {
+      showToast('截图失败，请重试');
+      return;
+    }
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob((result) => {
+        if (result) resolve(result);
+        else reject(new Error('无法生成截图'));
+      }, 'image/png');
+    });
+    await downloadBlob(blob, filename);
+  }
+
+  function getPdfImageEncodingSettings(pageCount, totalPixels, darkMode) {
+    let quality = 0.84;
+    let compression = 'MEDIUM';
+
+    if (totalPixels > 120_000_000 || pageCount > 80) {
+      quality = 0.62;
+      compression = 'FAST';
+    } else if (totalPixels > 65_000_000 || pageCount > 40) {
+      quality = 0.7;
+      compression = 'FAST';
+    } else if (totalPixels > 35_000_000 || pageCount > 22) {
+      quality = 0.76;
+      compression = 'MEDIUM';
+    }
+
+    if (darkMode) {
+      quality = Math.min(0.89, quality + 0.05);
+    }
+    return { quality, compression };
+  }
+
+  async function exportPdf(turns, filename) {
+    if (!window.jspdf?.jsPDF) {
+      throw new Error('PDF 库未加载');
+    }
+    showToast('正在生成 PDF...', 15000);
+
+    const visualTurns = state.turns.length ? state.turns : turns;
+    const renderResult = await renderConversationCanvas(visualTurns, { target: 'pdf' });
+    const canvas = renderResult?.canvas;
+    if (!canvas) {
+      showToast('截图失败，请重试');
+      return;
+    }
+    const linkRects = renderResult?.linkRects || [];
+    const renderCanvas = canvas;
+    const contentWidthPx = renderResult?.contentWidthPx || canvas.width;
+    const pdfBgRgb = colorStringToRgbTuple(renderResult?.bgColor || '#ffffff', [255, 255, 255]);
+    const darkPdf = isDarkColor(pdfBgRgb);
+    const { jsPDF } = window.jspdf;
+
+    // A4 分页并按页切片，避免整图偏移导致的空白页/兼容性问题
+    const pdf = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'p' });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const ptPerCssPx = pageWidth / contentWidthPx;
+    const ptPerCanvasPx = pageWidth / renderCanvas.width;
+    const pageHeightPx = Math.max(1, Math.floor(pageHeight / ptPerCanvasPx));
+    const pageCount = Math.max(1, Math.ceil(renderCanvas.height / pageHeightPx));
+    const { quality: jpegQuality, compression: jpegCompression } = getPdfImageEncodingSettings(
+      pageCount,
+      renderCanvas.width * renderCanvas.height,
+      darkPdf
+    );
+
+    const pageCanvas = document.createElement('canvas');
+    pageCanvas.width = renderCanvas.width;
+    const pageCtx = pageCanvas.getContext('2d');
+
+    for (let page = 0; page < pageCount; page++) {
+      const sy = page * pageHeightPx;
+      const sliceHeightPx = Math.min(pageHeightPx, renderCanvas.height - sy);
+      pageCanvas.height = sliceHeightPx;
+      if (!pageCtx) {
+        throw new Error('无法创建 PDF 页渲染上下文');
+      }
+      pageCtx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+      pageCtx.drawImage(
+        renderCanvas,
+        0,
+        sy,
+        renderCanvas.width,
+        sliceHeightPx,
+        0,
+        0,
+        pageCanvas.width,
+        pageCanvas.height
+      );
+
+      const pageImgData = pageCanvas.toDataURL('image/jpeg', jpegQuality);
+      const renderHeightPt = sliceHeightPx * ptPerCanvasPx;
+      if (page > 0) pdf.addPage();
+      pdf.setFillColor(pdfBgRgb[0], pdfBgRgb[1], pdfBgRgb[2]);
+      pdf.rect(0, 0, pageWidth, pageHeight, 'F');
+      pdf.addImage(pageImgData, 'JPEG', 0, 0, pageWidth, renderHeightPt, undefined, jpegCompression);
+    }
+
+    if (typeof pdf.link === 'function' && linkRects.length) {
+      const scalePdf = ptPerCssPx;
+      const renderedLinkRects = linkRects.map((rect) => ({
+        url: rect.href,
+        left: rect.left * scalePdf,
+        top: rect.top * scalePdf,
+        width: rect.width * scalePdf,
+        height: rect.height * scalePdf
+      }));
+
+      renderedLinkRects.forEach((rect) => {
+        const startPage = Math.floor(rect.top / pageHeight);
+        const endPage = Math.floor((rect.top + rect.height - 1e-3) / pageHeight);
+        for (let page = startPage; page <= endPage; page++) {
+          if (page < 0 || page >= pageCount) continue;
+          const pageTop = page * pageHeight;
+          const clippedTop = Math.max(rect.top, pageTop);
+          const clippedBottom = Math.min(rect.top + rect.height, pageTop + pageHeight);
+          const clippedHeight = clippedBottom - clippedTop;
+          if (clippedHeight <= 0) continue;
+          pdf.setPage(page + 1);
+          pdf.link(rect.left, clippedTop - pageTop, rect.width, clippedHeight, { url: rect.url });
+        }
+      });
+    }
+    pdf.save(filename);
+    showToast('PDF 导出完成');
+  }
+
+  // --- 下载与工具函数 ---
+
+  function escapeHtml(str) {
+    return (str || '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+  }
+
+  async function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === 'string') {
+          const parts = result.split(',');
+          resolve(parts[1] || '');
+        } else {
+          reject(new Error('无法读取文件内容'));
+        }
+      };
+      reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function downloadFile(content, filename, mime = 'application/octet-stream') {
+    const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+    await downloadBlob(blob, filename);
+  }
+
+  async function downloadBlob(blob, filename) {
+    if (!chrome.runtime?.id) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return;
+    }
+    try {
+      const base64 = await blobToBase64(blob);
+      const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per chunk
+      const totalParts = Math.ceil(base64.length / CHUNK_SIZE) || 1;
+      const fileId = (crypto?.randomUUID?.() || `ced-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+      for (let index = 0; index < totalParts; index++) {
+        const chunk = base64.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE);
+        await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage(
+            {
+              type: 'CED_DOWNLOAD_CHUNK',
+              fileId,
+              chunk,
+              index,
+              total: totalParts,
+              fileName: filename,
+              mime: blob.type || 'application/octet-stream'
+            },
+            (resp) => {
+              const error = chrome.runtime.lastError;
+              if (error) {
+                reject(new Error(error.message));
+                return;
+              }
+              if (resp?.ok) resolve();
+              else reject(new Error(resp?.error || 'Chunk transfer failed'));
+            }
+          );
+        });
+      }
+    } catch (error) {
+      console.error('Download failed:', error);
+      showToast(`下载失败: ${error?.message || '数据传输错误'}`);
+    }
+  }
+
+  async function exportTable(turns, filename, type) {
+    const isCsv = type === 'csv';
+    const rows = [['Role', 'Content']];
+    turns.forEach((t) => {
+      rows.push([formatRole(t.role), t.text.replace(/"/g, '""')]);
+    });
+
+    let content = '';
+    if (isCsv) {
+      content = rows.map((row) => row.map((cell) => `"${cell}"`).join(',')).join('\n');
+      await downloadFile(content, filename, 'text/csv');
+    } else {
+      content = `<html><head><meta charset="UTF-8"></head><body><table>${rows
+        .map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>`)
+        .join('')}</table></body></html>`;
+      await downloadFile(content, filename, 'application/vnd.ms-excel');
+    }
+  }
+
+  function replaceButtonsWithSpans(root) {
+    if (!root) return;
+    root.querySelectorAll('button').forEach((btn) => {
+      const span = document.createElement('span');
+      span.innerHTML = btn.innerHTML;
+      Array.from(btn.attributes).forEach((attr) => {
+        if (attr.name === 'type' || attr.name === 'aria-pressed') {
+          return;
+        }
+        span.setAttribute(attr.name, attr.value);
+      });
+      btn.replaceWith(span);
+    });
+  }
+
+  function staticizeDynamicContent(sourceRoot, cloneRoot) {
+    if (!sourceRoot || !cloneRoot) return;
+    const srcCanvases = sourceRoot.querySelectorAll('canvas');
+    if (!srcCanvases.length) return;
+    const dstCanvases = cloneRoot.querySelectorAll('canvas');
+    const len = Math.min(srcCanvases.length, dstCanvases.length);
+    for (let i = 0; i < len; i++) {
+      const src = srcCanvases[i];
+      const dst = dstCanvases[i];
+      if (!dst) continue;
+      try {
+        const dataUrl = src.toDataURL('image/png');
+        if (!dataUrl) continue;
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        if (src.width) img.width = src.width;
+        if (src.height) img.height = src.height;
+        if (dst.className) img.className = dst.className;
+        const style = dst.getAttribute('style');
+        if (style) img.setAttribute('style', style);
+        dst.replaceWith(img);
+      } catch (error) {
+        console.warn('[Chat Exporter] Canvas snapshot failed', error);
+      }
+    }
+  }
+
+  function stripUnsupportedColorFunctions(doc) {
+    if (!doc) return;
+    const COLOR_FN_REGEX = /\b(?:oklch|oklab|lch|lab)\s*\(/i;
+
+    const cleanStyleDeclaration = (style) => {
+      if (!style) return;
+      const properties = Array.from(style);
+      for (const name of properties) {
+        try {
+          const value = style.getPropertyValue(name);
+          if (COLOR_FN_REGEX.test(value)) {
+            style.removeProperty(name);
+          }
+        } catch (error) {
+          console.warn('[Chat Exporter] Failed to inspect style property', error);
+        }
+      }
+    };
+
+    const styleSheets = Array.from(doc.styleSheets || []);
+    for (const sheet of styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (error) {
+        continue;
+      }
+      if (!rules) continue;
+      for (const rule of Array.from(rules)) {
+        if (rule instanceof CSSStyleRule && rule.style) {
+          cleanStyleDeclaration(rule.style);
+        }
+      }
+    }
+
+    doc.querySelectorAll('[style]').forEach((el) => {
+      cleanStyleDeclaration(el.style);
+    });
+  }
+
+})();

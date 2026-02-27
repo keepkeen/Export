@@ -1,0 +1,23 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Build outputs / packages
+dist/
+*.zip
+*.crx
+
+# Secrets / certificates
+certs/
+*.pem
+*.key
+
+# Dependencies / caches
+node_modules/
+*.log
+tmp/
+temp/
+
+# Local generated docs
+PROJECT_OVERVIEW.txt

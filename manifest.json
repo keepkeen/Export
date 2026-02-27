@@ -1,0 +1,95 @@
+{
+  "manifest_version": 3,
+  "name": "Chat Exporter (ChatGPT + Gemini + Claude + Grok)",
+  "description": "Dockable sidebar for exporting ChatGPT, Gemini, Claude, and Grok conversations to text, markdown, Word, JSON, Excel, CSV, PDF, screenshot and more.",
+  "version": "0.1.0",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "downloads",
+    "tabs",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://chat.openai.com/*",
+    "https://chatgpt.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*",
+    "https://*.claude.ai/*",
+    "https://*.anthropic.com/*",
+    "https://grok.com/*",
+    "https://*.grok.com/*",
+    "https://*.x.ai/*",
+    "https://x.com/*",
+    "https://*.openai.com/*",
+    "https://*.oaistatic.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://*.gstatic.com/*",
+    "https://*.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "src/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chat.openai.com/*",
+        "https://chatgpt.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*",
+        "https://*.claude.ai/*",
+        "https://grok.com/*",
+        "https://*.grok.com/*"
+      ],
+      "js": [
+        "vendor/html2canvas-pro.min.js",
+        "vendor/jspdf.umd.min.js",
+        "src/content-script.js"
+      ],
+      "css": ["src/styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/katex.min.css",
+        "vendor/fonts/*"
+      ],
+      "matches": [
+        "https://chat.openai.com/*",
+        "https://chatgpt.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*",
+        "https://*.claude.ai/*",
+        "https://grok.com/*",
+        "https://*.grok.com/*"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Chat Exporter (ChatGPT + Gemini + Claude + Grok)",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "commands": {
+    "toggle_chatgpt_exporter": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Toggle the AI chat exporter sidebar"
+    }
+  }
+}
