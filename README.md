@@ -27,7 +27,8 @@ Browser extension for exporting ChatGPT / Gemini / Claude / Grok conversations w
   - long conversation handling for Screenshot/PDF/Word/HTML
 - ChatGPT formula UX:
   - hover formula to reveal copy affordance
-  - click once to copy LaTeX
+  - click once to copy formula source
+  - copy format options: `LaTeX` / `LaTeX (No $)` / `MathML (Word)`
   - inline side hint on copy success/failure
 - Shortcut and context-menu integration (`Ctrl/Cmd + Shift + Y`).
 

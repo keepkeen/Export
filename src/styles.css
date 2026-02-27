@@ -327,6 +327,49 @@
   color: #dbf8ff;
 }
 
+.ced-option-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ced-option-button {
+  padding: 9px 10px;
+  text-align: left;
+  border-radius: var(--ced-radius-md);
+  border: 1px solid var(--ced-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ced-text);
+  cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.ced-option-button div {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 3px;
+}
+
+.ced-option-button small {
+  display: block;
+  font-size: 11px;
+  color: var(--ced-text-soft);
+  line-height: 1.22;
+}
+
+.ced-option-button:hover {
+  transform: translateY(-1px);
+  border-color: var(--ced-border-strong);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.ced-option-button--active {
+  border-color: rgba(65, 209, 255, 0.72);
+  background: linear-gradient(180deg, rgba(65, 209, 255, 0.2), rgba(124, 123, 255, 0.16));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
 .ced-input {
   width: 100%;
   box-sizing: border-box;
@@ -518,51 +561,51 @@
   transform: translateX(-50%) translateY(0);
 }
 
-.ced-latex-copy-target {
+.ced-formula-node {
   position: relative;
-  cursor: copy;
-  border-radius: 8px;
+  border-radius: 10px;
   transition: background-color 0.16s ease, box-shadow 0.16s ease;
 }
 
-.ced-latex-copy-target:hover,
-.ced-latex-copy-target:focus-visible {
+.ced-formula-node:hover {
   background: rgba(65, 209, 255, 0.08);
   box-shadow: inset 0 0 0 1px rgba(65, 209, 255, 0.42);
 }
 
-.ced-latex-copy-target:focus-visible {
-  outline: none;
-}
-
-.ced-latex-copy-target::after {
-  content: "复制 LaTeX";
+.ced-formula-copy-btn {
   position: absolute;
-  top: -22px;
-  right: 0;
-  padding: 2px 7px;
+  top: -18px;
+  right: -2px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(8, 14, 27, 0.92);
-  color: #f4f8ff;
+  padding: 3px 10px;
   font-family: var(--ced-font);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+  color: #f4f8ff;
+  background: rgba(16, 26, 44, 0.96);
+  box-shadow: 0 8px 20px rgba(6, 11, 24, 0.38);
   opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 0.16s ease, transform 0.16s ease;
-  pointer-events: none;
-  z-index: 1;
+  visibility: hidden;
+  transform: translateY(6px);
+  transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s ease;
+  cursor: pointer;
+  z-index: 3;
 }
 
-.ced-latex-copy-target:hover::after,
-.ced-latex-copy-target:focus-visible::after {
+.ced-formula-node:hover > .ced-formula-copy-btn,
+.ced-formula-copy-btn:focus-visible {
   opacity: 1;
+  visibility: visible;
   transform: translateY(0);
 }
 
-.ced-formula-copy-hint {
+.ced-formula-copy-btn:focus-visible {
+  outline: none;
+  border-color: rgba(65, 209, 255, 0.74);
+}
+
+.ced-formula-copy-toast {
   position: fixed;
   z-index: 2147483647;
   padding: 6px 10px;
@@ -582,7 +625,15 @@
   box-shadow: 0 10px 26px rgba(6, 11, 24, 0.36);
 }
 
-.ced-formula-copy-hint--visible {
+.ced-formula-copy-toast--success {
+  background: rgba(10, 122, 76, 0.94);
+}
+
+.ced-formula-copy-toast--error {
+  background: rgba(152, 35, 35, 0.95);
+}
+
+.ced-formula-copy-toast--visible {
   opacity: 1;
   visibility: visible;
   transform: translateY(-50%) translateX(0);
@@ -642,6 +693,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .ced-option-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .ced-floating-button {
     width: 48px;
     height: 48px;
@@ -652,11 +707,13 @@
   .ced-floating-button,
   .ced-panel,
   .ced-format-button,
+  .ced-option-button,
   .ced-turn-card,
   .ced-button,
   .ced-toast,
-  .ced-latex-copy-target,
-  .ced-formula-copy-hint,
+  .ced-formula-node,
+  .ced-formula-copy-btn,
+  .ced-formula-copy-toast,
   .ced-section {
     animation: none !important;
     transition: none !important;

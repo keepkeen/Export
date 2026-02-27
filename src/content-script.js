@@ -110,12 +110,19 @@
     { id: 'hide', label: 'Hide', ext: '', description: '隐藏面板' }
   ];
 
+  const FORMULA_COPY_FORMATS = [
+    { id: 'latex', label: 'LaTeX', description: '包含 $ 包裹符' },
+    { id: 'no-dollar', label: 'LaTeX+', description: '纯公式文本（无$）' },
+    { id: 'mathml', label: 'MathML', description: '适配 Word 公式粘贴' }
+  ];
+
   const STORAGE_KEYS = {
     widget: 'ced-widget',
     format: 'ced-format',
     selection: 'ced-selection',
     dock: 'ced-dock',
-    fileName: 'ced-filename'
+    fileName: 'ced-filename',
+    formulaCopyFormat: 'ced-formula-copy-format'
   };
 
   const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
@@ -325,9 +332,7 @@
     widgetGuardObserver: null,
     isWidgetDragging: false,
     parseMode: 'normal',
-    formulaHydrateTimer: null,
-    formulaHintEl: null,
-    formulaHintTimer: null
+    formulaCopyFormat: 'latex'
   };
 
   // --- 初始化 ---
@@ -358,7 +363,7 @@
     injectToast();
     attachWidget();
     attachPanel();
-    setupChatGptFormulaCopySupport();
+    initFormulaCopyFeature();
     await refreshConversationData();
     observeConversation();
   }
@@ -396,13 +401,16 @@
       [STORAGE_KEYS.widget]: state.widgetPosition,
       [STORAGE_KEYS.format]: state.selectedFormat,
       [STORAGE_KEYS.dock]: state.panelSide,
-      [STORAGE_KEYS.fileName]: state.fileName
+      [STORAGE_KEYS.fileName]: state.fileName,
+      [STORAGE_KEYS.formulaCopyFormat]: state.formulaCopyFormat
     };
     const stored = await new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
     if (stored[STORAGE_KEYS.widget]) state.widgetPosition = stored[STORAGE_KEYS.widget];
     if (stored[STORAGE_KEYS.format]) state.selectedFormat = stored[STORAGE_KEYS.format];
     if (stored[STORAGE_KEYS.dock]) state.panelSide = stored[STORAGE_KEYS.dock];
     if (typeof stored[STORAGE_KEYS.fileName] === 'string') state.fileName = stored[STORAGE_KEYS.fileName];
+    if (stored[STORAGE_KEYS.formulaCopyFormat]) state.formulaCopyFormat = stored[STORAGE_KEYS.formulaCopyFormat];
+    state.formulaCopyFormat = normalizeFormulaCopyFormat(state.formulaCopyFormat);
   }
 
   function persist(key, value) {
@@ -537,6 +545,9 @@
 
     const body = panel.querySelector('.ced-panel__body');
     body.appendChild(buildFormatSection());
+    if (SITE_KEY === SITE_KEYS.chatgpt) {
+      body.appendChild(buildFormulaCopySection());
+    }
     body.appendChild(buildFileNameSection());
     body.appendChild(buildTurnsSection());
     body.appendChild(buildActionSection());
@@ -616,6 +627,35 @@
     });
     state.nameInput = input;
     section.appendChild(input);
+    return section;
+  }
+
+  function buildFormulaCopySection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">公式复制格式</div>';
+
+    const grid = document.createElement('div');
+    grid.className = 'ced-option-grid';
+
+    FORMULA_COPY_FORMATS.forEach((fmt) => {
+      const btn = document.createElement('button');
+      btn.className = 'ced-option-button';
+      if (fmt.id === state.formulaCopyFormat) btn.classList.add('ced-option-button--active');
+      btn.innerHTML = `<div>${fmt.label}</div><small style="opacity:.72;font-size:12px;">${fmt.description}</small>`;
+      btn.addEventListener('click', () => {
+        state.formulaCopyFormat = fmt.id;
+        persist(STORAGE_KEYS.formulaCopyFormat, fmt.id);
+        section
+          .querySelectorAll('.ced-option-button')
+          .forEach((el) => el.classList.remove('ced-option-button--active'));
+        btn.classList.add('ced-option-button--active');
+        syncFormulaCopyFeatureConfig();
+      });
+      grid.appendChild(btn);
+    });
+
+    section.appendChild(grid);
     return section;
   }
 
@@ -776,7 +816,7 @@
 
   function isLikelyMessageNode(node) {
     if (!(node instanceof HTMLElement)) return false;
-    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-hint')) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast')) return false;
 
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -1026,151 +1066,53 @@
     });
   }
 
+  function normalizeLatexSource(value) {
+    return (value || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\r\n?/g, '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
   function extractLatexFromKatexNode(node) {
     if (!(node instanceof HTMLElement)) return '';
-    const annotation = node.querySelector('annotation');
-    const latex = annotation?.textContent?.trim();
-    return latex || '';
+    if (window.__cedFormulaCopy?.extractLatexFromKatexNode) {
+      const delegated = window.__cedFormulaCopy.extractLatexFromKatexNode(node);
+      if (delegated) return normalizeLatexSource(delegated);
+    }
+    const annotation = node.querySelector('annotation[encoding="application/x-tex"]')
+      || node.querySelector('annotation');
+    const latex = annotation?.textContent || '';
+    return normalizeLatexSource(latex);
   }
 
-  function setupChatGptFormulaCopySupport() {
+  function normalizeFormulaCopyFormat(format) {
+    if (format === 'latex' || format === 'mathml' || format === 'no-dollar') {
+      return format;
+    }
+    return 'latex';
+  }
+
+  function initFormulaCopyFeature() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
-    hydrateChatGptFormulaCopyTargets(document);
-    document.addEventListener('click', handleFormulaCopyClick, true);
-    document.addEventListener('keydown', handleFormulaCopyKeydown, true);
+    state.formulaCopyFormat = normalizeFormulaCopyFormat(state.formulaCopyFormat);
+    if (window.__cedFormulaCopy?.initialize) {
+      window.__cedFormulaCopy.initialize({
+        format: state.formulaCopyFormat
+      });
+    }
   }
 
-  function scheduleFormulaCopyHydration() {
+  function syncFormulaCopyFeatureConfig() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
-    if (state.formulaHydrateTimer) {
-      clearTimeout(state.formulaHydrateTimer);
+    state.formulaCopyFormat = normalizeFormulaCopyFormat(state.formulaCopyFormat);
+    if (window.__cedFormulaCopy?.setFormat) {
+      window.__cedFormulaCopy.setFormat(state.formulaCopyFormat);
     }
-    state.formulaHydrateTimer = setTimeout(() => {
-      state.formulaHydrateTimer = null;
-      hydrateChatGptFormulaCopyTargets(document);
-    }, 140);
-  }
-
-  function hydrateChatGptFormulaCopyTargets(root) {
-    if (SITE_KEY !== SITE_KEYS.chatgpt || !root?.querySelectorAll) return;
-    root.querySelectorAll('.katex-display, .katex').forEach((node) => {
-      if (!(node instanceof HTMLElement)) return;
-      if (node.classList.contains('katex') && node.closest('.katex-display')) return;
-      if (node.closest('.ced-panel')) return;
-      const latex = extractLatexFromKatexNode(node);
-      if (!latex) return;
-
-      node.classList.add('ced-latex-copy-target');
-      node.dataset.cedLatex = latex;
-      node.setAttribute('title', '点击复制 LaTeX');
-      node.setAttribute('role', 'button');
-      node.setAttribute('tabindex', '0');
-      node.setAttribute('aria-label', '点击复制 LaTeX');
-    });
-  }
-
-  function isFormulaCopyTarget(target) {
-    if (!(target instanceof Element)) return null;
-    const matched = target.closest('.ced-latex-copy-target');
-    return matched instanceof HTMLElement ? matched : null;
-  }
-
-  async function handleFormulaCopyClick(event) {
-    const target = isFormulaCopyTarget(event.target);
-    if (!target) return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    const latex = target.dataset.cedLatex || extractLatexFromKatexNode(target);
-    if (!latex) return;
-    const copied = await copyTextToClipboard(latex);
-    showFormulaCopyHint(target, copied ? 'LaTeX 已复制' : '复制失败');
-  }
-
-  async function handleFormulaCopyKeydown(event) {
-    const target = isFormulaCopyTarget(event.target);
-    if (!target) return;
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    const latex = target.dataset.cedLatex || extractLatexFromKatexNode(target);
-    if (!latex) return;
-    const copied = await copyTextToClipboard(latex);
-    showFormulaCopyHint(target, copied ? 'LaTeX 已复制' : '复制失败');
-  }
-
-  async function copyTextToClipboard(text) {
-    if (!text) return false;
-
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return true;
-      }
-    } catch (error) {
-      // fallback below
-    }
-
-    try {
-      const input = document.createElement('textarea');
-      input.value = text;
-      input.setAttribute('readonly', 'readonly');
-      input.style.position = 'fixed';
-      input.style.left = '-9999px';
-      input.style.top = '-9999px';
-      input.style.opacity = '0';
-      document.body.appendChild(input);
-      input.focus();
-      input.select();
-      input.setSelectionRange(0, input.value.length);
-      const ok = document.execCommand('copy');
-      input.remove();
-      return ok;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  function ensureFormulaCopyHint() {
-    if (state.formulaHintEl?.isConnected) return state.formulaHintEl;
-    const hint = document.createElement('div');
-    hint.className = 'ced-formula-copy-hint';
-    document.body.appendChild(hint);
-    state.formulaHintEl = hint;
-    return hint;
-  }
-
-  function showFormulaCopyHint(anchor, message) {
-    if (!(anchor instanceof HTMLElement)) return;
-    const hint = ensureFormulaCopyHint();
-    hint.textContent = message;
-    positionFormulaCopyHint(anchor, hint);
-    hint.classList.remove('ced-formula-copy-hint--visible');
-    // Force reflow for transition replay.
-    void hint.offsetWidth;
-    hint.classList.add('ced-formula-copy-hint--visible');
-
-    if (state.formulaHintTimer) clearTimeout(state.formulaHintTimer);
-    state.formulaHintTimer = setTimeout(() => {
-      state.formulaHintTimer = null;
-      hint.classList.remove('ced-formula-copy-hint--visible');
-    }, 1200);
-  }
-
-  function positionFormulaCopyHint(anchor, hint) {
-    const rect = anchor.getBoundingClientRect();
-    const margin = 10;
-    const top = Math.max(8, Math.min(window.innerHeight - 8, rect.top + (rect.height / 2)));
-    hint.style.top = `${Math.round(top)}px`;
-
-    hint.style.left = '-9999px';
-    const hintWidth = Math.ceil(hint.getBoundingClientRect().width || hint.offsetWidth || 120);
-    let left = rect.right + margin;
-    if (left + hintWidth > window.innerWidth - 8) {
-      left = Math.max(8, rect.left - hintWidth - margin);
-    }
-    hint.style.left = `${Math.round(left)}px`;
   }
 
   function annotateImages(node) {
@@ -1357,7 +1299,6 @@
     state.observer = new MutationObserver(() => {
       clearTimeout(state.refreshTimer);
       state.refreshTimer = setTimeout(refreshConversationData, 800);
-      scheduleFormulaCopyHydration();
     });
     const target = queryFirst(SCROLL_CONTAINER_SELECTORS) || queryFirst(CONVERSATION_ROOT_SELECTORS) || document.querySelector('main') || document.body;
     state.observer.observe(target, { childList: true, subtree: true });
@@ -1576,7 +1517,7 @@
 
         controls.forEach((control) => {
           if (!(control instanceof HTMLElement)) return;
-          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-hint')) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast')) return;
           if (control.matches('[aria-expanded="true"]')) return;
           if (control instanceof HTMLButtonElement && control.disabled) return;
           if (isClaudeActionBarControl(control)) return;
@@ -1998,7 +1939,7 @@
     const addIfSafe = (node) => {
       if (!(node instanceof HTMLElement)) return;
       if (node === root) return;
-      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-hint')) {
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast')) {
         removable.add(node);
         return;
       }
@@ -2046,17 +1987,19 @@
     const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
     const clonedRoot = sourceRoot.cloneNode(true);
 
-    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-hint'].forEach((selector) => {
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast'].forEach((selector) => {
       clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
     });
-    clonedRoot.querySelectorAll('.ced-latex-copy-target').forEach((el) => {
-      el.classList.remove('ced-latex-copy-target');
+    clonedRoot.querySelectorAll('.ced-formula-node').forEach((el) => {
+      el.classList.remove('ced-formula-node');
       el.removeAttribute('role');
       el.removeAttribute('tabindex');
       el.removeAttribute('title');
       el.removeAttribute('aria-label');
-      delete el.dataset.cedLatex;
+      delete el.dataset.cedFormulaLatex;
+      delete el.dataset.cedFormulaDisplay;
     });
+    clonedRoot.querySelectorAll('.ced-formula-copy-btn').forEach((el) => el.remove());
 
     const clonedTurns = Array.from(clonedRoot.querySelectorAll(SELECTORS.MESSAGE_TURN));
     clonedTurns.forEach((clonedTurn) => {
@@ -2100,7 +2043,7 @@
 <base href="${escapeHtml(location.origin + '/')}">
 ${headClone.innerHTML}
 <style>
-  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-hint {
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn {
     display: none !important;
   }
   [data-testid*="composer"],

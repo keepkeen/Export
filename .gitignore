@@ -21,3 +21,6 @@ temp/
 
 # Local generated docs
 PROJECT_OVERVIEW.txt
+
+# Local reference repositories
+gemini-voyager/

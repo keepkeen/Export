@@ -37,3 +37,44 @@
   - `node --check src/service-worker.js` 通过。
   - 关键字符串回归检查确认：降级提示字符串已移除，公式复制样式/逻辑存在。
   - 已在项目目录初始化独立 Git 仓库并配置远端 `https://github.com/keepkeen/Export.git`。
+
+---
+
+## Iteration 2 Goal
+- 解决复制出的 LaTeX 被换行的问题。
+- 参考 `gemini-voyager` 的公式识别与复制实现，迁移到 ChatGPT 页面。
+- 在当前项目中以“职责分离、便于维护”的方式落地公式复制模块与设置项。
+
+## Iteration 2 Plan
+- [x] 盘点 `gemini-voyager` 公式复制实现与可迁移功能清单。
+- [x] 将公式复制逻辑从 `content-script.js` 抽离为独立模块（识别/复制/提示/格式）。
+- [x] 迁移并适配复制格式能力：`LaTeX` / `LaTeX(无$)` / `MathML(Word)`.
+- [x] 修复 LaTeX 源码换行：规范化 annotation 文本，避免复制结果硬换行。
+- [x] 接入现有侧边面板配置并持久化存储。
+- [x] 完成语法检查与关键行为验证，更新 review。
+
+## Iteration 2 Acceptance
+- [x] ChatGPT 中公式点击复制后，LaTeX 不再出现异常换行。
+- [x] 支持切换复制格式（LaTeX / 无$ / MathML），并能持久化。
+- [x] 公式复制功能代码独立成模块，`content-script.js` 仅负责装配调用。
+
+## Iteration 2 Review
+- 参考实现来源：
+  - `gemini-voyager/src/features/formulaCopy/FormulaCopyService.ts`
+  - `gemini-voyager/public/contentStyle.css`（公式 hover + toast 样式）
+- 新增模块：
+  - `src/formula-copy-feature.js`
+  - 采用服务化封装：识别、提取、格式化、复制、提示、DOM 观察独立在模块内。
+- 迁移能力：
+  - 公式自动识别（`.katex-display`、`.katex`）。
+  - 复制格式：LaTeX / LaTeX(无$) / MathML(Word)。
+  - 剪贴板策略：`ClipboardItem`（含 `text/html`/`application/mathml+xml`）优先，失败回退。
+  - 复制结果提示：公式旁 toast，成功/失败分态。
+- 换行修复：
+  - 引入 `normalizeLatexSource`，对 annotation 源码做空白与换行归一化，避免复制结果被硬换行。
+- 配置集成：
+  - 面板新增“公式复制格式”区块，写入 `ced-formula-copy-format` 并实时同步模块。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/formula-copy-feature.js`
+  - `node --check src/service-worker.js`
