@@ -125,7 +125,11 @@
     formulaCopyFormat: 'ced-formula-copy-format',
     timelineEnabled: 'ced-timeline-enabled',
     titleUpdaterEnabled: 'ced-title-updater-enabled',
-    titleUpdaterIncludeFolder: 'ced-title-updater-include-folder'
+    titleUpdaterIncludeFolder: 'ced-title-updater-include-folder',
+    sidebarAutoHideEnabled: 'ced-sidebar-autohide-enabled',
+    folderSpacing: 'ced-folder-spacing',
+    markdownPatcherEnabled: 'ced-markdown-patcher-enabled',
+    snowEffectEnabled: 'ced-snow-effect-enabled'
   };
 
   const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
@@ -338,7 +342,11 @@
     formulaCopyFormat: 'latex',
     timelineEnabled: true,
     titleUpdaterEnabled: true,
-    titleUpdaterIncludeFolder: true
+    titleUpdaterIncludeFolder: true,
+    sidebarAutoHideEnabled: false,
+    folderSpacing: 2,
+    markdownPatcherEnabled: true,
+    snowEffectEnabled: false
   };
 
   // --- 初始化 ---
@@ -373,6 +381,10 @@
     initFolderFeature();
     initPromptVaultFeature();
     initTitleUpdaterFeature();
+    initSidebarAutoHideFeature();
+    initFolderSpacingFeature();
+    initMarkdownPatcherFeature();
+    initSnowEffectFeature();
     attachPanel();
     await refreshConversationData();
     observeConversation();
@@ -415,7 +427,11 @@
       [STORAGE_KEYS.formulaCopyFormat]: state.formulaCopyFormat,
       [STORAGE_KEYS.timelineEnabled]: state.timelineEnabled,
       [STORAGE_KEYS.titleUpdaterEnabled]: state.titleUpdaterEnabled,
-      [STORAGE_KEYS.titleUpdaterIncludeFolder]: state.titleUpdaterIncludeFolder
+      [STORAGE_KEYS.titleUpdaterIncludeFolder]: state.titleUpdaterIncludeFolder,
+      [STORAGE_KEYS.sidebarAutoHideEnabled]: state.sidebarAutoHideEnabled,
+      [STORAGE_KEYS.folderSpacing]: state.folderSpacing,
+      [STORAGE_KEYS.markdownPatcherEnabled]: state.markdownPatcherEnabled,
+      [STORAGE_KEYS.snowEffectEnabled]: state.snowEffectEnabled
     };
     const stored = await new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
     if (stored[STORAGE_KEYS.widget]) state.widgetPosition = stored[STORAGE_KEYS.widget];
@@ -436,6 +452,22 @@
     }
     state.titleUpdaterEnabled = normalizeTitleUpdaterEnabled(state.titleUpdaterEnabled);
     state.titleUpdaterIncludeFolder = normalizeTitleUpdaterIncludeFolder(state.titleUpdaterIncludeFolder);
+    if (typeof stored[STORAGE_KEYS.sidebarAutoHideEnabled] === 'boolean') {
+      state.sidebarAutoHideEnabled = stored[STORAGE_KEYS.sidebarAutoHideEnabled];
+    }
+    if (typeof stored[STORAGE_KEYS.folderSpacing] === 'number') {
+      state.folderSpacing = stored[STORAGE_KEYS.folderSpacing];
+    }
+    if (typeof stored[STORAGE_KEYS.markdownPatcherEnabled] === 'boolean') {
+      state.markdownPatcherEnabled = stored[STORAGE_KEYS.markdownPatcherEnabled];
+    }
+    if (typeof stored[STORAGE_KEYS.snowEffectEnabled] === 'boolean') {
+      state.snowEffectEnabled = stored[STORAGE_KEYS.snowEffectEnabled];
+    }
+    state.sidebarAutoHideEnabled = normalizeSidebarAutoHideEnabled(state.sidebarAutoHideEnabled);
+    state.folderSpacing = normalizeFolderSpacing(state.folderSpacing);
+    state.markdownPatcherEnabled = normalizeMarkdownPatcherEnabled(state.markdownPatcherEnabled);
+    state.snowEffectEnabled = normalizeSnowEffectEnabled(state.snowEffectEnabled);
   }
 
   function persist(key, value) {
@@ -573,6 +605,10 @@
     if (SITE_KEY === SITE_KEYS.chatgpt) {
       body.appendChild(buildFormulaCopySection());
       body.appendChild(buildTimelineSection());
+      body.appendChild(buildSidebarAutoHideSection());
+      body.appendChild(buildFolderSpacingSection());
+      body.appendChild(buildMarkdownPatcherSection());
+      body.appendChild(buildSnowEffectSection());
       const folderSection = window.__cedFolder?.buildPanelSection?.();
       if (folderSection instanceof HTMLElement) {
         body.appendChild(folderSection);
@@ -774,6 +810,122 @@
     return section;
   }
 
+  function buildSidebarAutoHideSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">侧边栏自动隐藏</div>';
+
+    const row = document.createElement('label');
+    row.className = 'ced-toggle-row';
+    row.innerHTML = `
+      <input type="checkbox" class="ced-toggle-row__checkbox">
+      <div class="ced-toggle-row__content">
+        <div class="ced-toggle-row__label">鼠标离开后自动收起</div>
+        <div class="ced-toggle-row__hint">鼠标移到左边缘可再次展开</div>
+      </div>
+    `;
+
+    const checkbox = row.querySelector('.ced-toggle-row__checkbox');
+    if (checkbox instanceof HTMLInputElement) {
+      checkbox.checked = state.sidebarAutoHideEnabled;
+      checkbox.addEventListener('change', () => {
+        state.sidebarAutoHideEnabled = checkbox.checked;
+        persist(STORAGE_KEYS.sidebarAutoHideEnabled, state.sidebarAutoHideEnabled);
+        syncSidebarAutoHideFeatureConfig();
+      });
+    }
+
+    section.appendChild(row);
+    return section;
+  }
+
+  function buildFolderSpacingSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = `
+      <div class="ced-section__title">文件夹间距</div>
+      <div class="ced-range-row">
+        <input type="range" min="0" max="16" step="1" class="ced-range-row__input">
+        <div class="ced-range-row__value"></div>
+      </div>
+    `;
+
+    const slider = section.querySelector('.ced-range-row__input');
+    const valueEl = section.querySelector('.ced-range-row__value');
+
+    if (slider instanceof HTMLInputElement && valueEl instanceof HTMLElement) {
+      slider.value = String(state.folderSpacing);
+      valueEl.textContent = `${state.folderSpacing}px`;
+      slider.addEventListener('input', () => {
+        state.folderSpacing = normalizeFolderSpacing(Number(slider.value));
+        slider.value = String(state.folderSpacing);
+        valueEl.textContent = `${state.folderSpacing}px`;
+        persist(STORAGE_KEYS.folderSpacing, state.folderSpacing);
+        syncFolderSpacingFeatureConfig();
+      });
+    }
+
+    return section;
+  }
+
+  function buildMarkdownPatcherSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">Markdown 修复增强</div>';
+
+    const row = document.createElement('label');
+    row.className = 'ced-toggle-row';
+    row.innerHTML = `
+      <input type="checkbox" class="ced-toggle-row__checkbox">
+      <div class="ced-toggle-row__content">
+        <div class="ced-toggle-row__label">修复被打断的粗体语法</div>
+        <div class="ced-toggle-row__hint">自动修补 \`**...\` 被节点插入打断的问题</div>
+      </div>
+    `;
+
+    const checkbox = row.querySelector('.ced-toggle-row__checkbox');
+    if (checkbox instanceof HTMLInputElement) {
+      checkbox.checked = state.markdownPatcherEnabled;
+      checkbox.addEventListener('change', () => {
+        state.markdownPatcherEnabled = checkbox.checked;
+        persist(STORAGE_KEYS.markdownPatcherEnabled, state.markdownPatcherEnabled);
+        syncMarkdownPatcherFeatureConfig();
+      });
+    }
+
+    section.appendChild(row);
+    return section;
+  }
+
+  function buildSnowEffectSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section';
+    section.innerHTML = '<div class="ced-section__title">Snow Effect</div>';
+
+    const row = document.createElement('label');
+    row.className = 'ced-toggle-row';
+    row.innerHTML = `
+      <input type="checkbox" class="ced-toggle-row__checkbox">
+      <div class="ced-toggle-row__content">
+        <div class="ced-toggle-row__label">启用雪花装饰效果</div>
+        <div class="ced-toggle-row__hint">视觉特效，不影响页面交互（可随时关闭）</div>
+      </div>
+    `;
+
+    const checkbox = row.querySelector('.ced-toggle-row__checkbox');
+    if (checkbox instanceof HTMLInputElement) {
+      checkbox.checked = state.snowEffectEnabled;
+      checkbox.addEventListener('change', () => {
+        state.snowEffectEnabled = checkbox.checked;
+        persist(STORAGE_KEYS.snowEffectEnabled, state.snowEffectEnabled);
+        syncSnowEffectFeatureConfig();
+      });
+    }
+
+    section.appendChild(row);
+    return section;
+  }
+
   function buildTurnsSection() {
     const section = document.createElement('section');
     section.className = 'ced-section';
@@ -936,7 +1088,7 @@
 
   function isLikelyMessageNode(node) {
     if (!(node instanceof HTMLElement)) return false;
-    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu')) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return false;
 
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -1229,6 +1381,24 @@
     return value !== false;
   }
 
+  function normalizeSidebarAutoHideEnabled(value) {
+    return value === true;
+  }
+
+  function normalizeFolderSpacing(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 2;
+    return Math.max(0, Math.min(16, Math.round(numeric)));
+  }
+
+  function normalizeMarkdownPatcherEnabled(value) {
+    return value !== false;
+  }
+
+  function normalizeSnowEffectEnabled(value) {
+    return value === true;
+  }
+
   function extractConversationIdFromUrl(url) {
     if (!url || typeof url !== 'string') return '';
     const match = url.match(/\/c\/([a-zA-Z0-9_-]+)/);
@@ -1391,6 +1561,63 @@
       siteName: 'ChatGPT'
     });
     window.__cedTitleUpdater?.refresh?.();
+  }
+
+  function initSidebarAutoHideFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.sidebarAutoHideEnabled = normalizeSidebarAutoHideEnabled(state.sidebarAutoHideEnabled);
+    window.__cedSidebarAutoHide?.initialize?.({
+      enabled: state.sidebarAutoHideEnabled
+    });
+  }
+
+  function syncSidebarAutoHideFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.sidebarAutoHideEnabled = normalizeSidebarAutoHideEnabled(state.sidebarAutoHideEnabled);
+    window.__cedSidebarAutoHide?.setEnabled?.(state.sidebarAutoHideEnabled);
+  }
+
+  function initFolderSpacingFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.folderSpacing = normalizeFolderSpacing(state.folderSpacing);
+    window.__cedFolderSpacing?.initialize?.({
+      enabled: true,
+      spacing: state.folderSpacing
+    });
+  }
+
+  function syncFolderSpacingFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.folderSpacing = normalizeFolderSpacing(state.folderSpacing);
+    window.__cedFolderSpacing?.setSpacing?.(state.folderSpacing);
+  }
+
+  function initMarkdownPatcherFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.markdownPatcherEnabled = normalizeMarkdownPatcherEnabled(state.markdownPatcherEnabled);
+    window.__cedMarkdownPatcher?.initialize?.({
+      enabled: state.markdownPatcherEnabled
+    });
+  }
+
+  function syncMarkdownPatcherFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.markdownPatcherEnabled = normalizeMarkdownPatcherEnabled(state.markdownPatcherEnabled);
+    window.__cedMarkdownPatcher?.setEnabled?.(state.markdownPatcherEnabled);
+  }
+
+  function initSnowEffectFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.snowEffectEnabled = normalizeSnowEffectEnabled(state.snowEffectEnabled);
+    window.__cedSnowEffect?.initialize?.({
+      enabled: state.snowEffectEnabled
+    });
+  }
+
+  function syncSnowEffectFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.snowEffectEnabled = normalizeSnowEffectEnabled(state.snowEffectEnabled);
+    window.__cedSnowEffect?.setEnabled?.(state.snowEffectEnabled);
   }
 
   function annotateImages(node) {
@@ -1795,7 +2022,7 @@
 
         controls.forEach((control) => {
           if (!(control instanceof HTMLElement)) return;
-          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu')) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return;
           if (control.matches('[aria-expanded="true"]')) return;
           if (control instanceof HTMLButtonElement && control.disabled) return;
           if (isClaudeActionBarControl(control)) return;
@@ -2217,7 +2444,7 @@
     const addIfSafe = (node) => {
       if (!(node instanceof HTMLElement)) return;
       if (node === root) return;
-      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu')) {
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas')) {
         removable.add(node);
         return;
       }
@@ -2265,7 +2492,7 @@
     const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
     const clonedRoot = sourceRoot.cloneNode(true);
 
-    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-context-menu'].forEach((selector) => {
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-context-menu', '.ced-snow-effect-canvas'].forEach((selector) => {
       clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
     });
     clonedRoot.querySelectorAll('.ced-formula-node').forEach((el) => {
@@ -2321,7 +2548,7 @@
 <base href="${escapeHtml(location.origin + '/')}">
 ${headClone.innerHTML}
 <style>
-  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu {
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-context-menu, .ced-snow-effect-canvas {
     display: none !important;
   }
   [data-testid*="composer"],

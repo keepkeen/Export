@@ -51,6 +51,10 @@
         "src/folder-feature.js",
         "src/prompt-vault-feature.js",
         "src/title-updater-feature.js",
+        "src/sidebar-autohide-feature.js",
+        "src/folder-spacing-feature.js",
+        "src/markdown-patcher-feature.js",
+        "src/snow-effect-feature.js",
         "src/content-script.js"
       ],
       "css": ["src/styles.css"],

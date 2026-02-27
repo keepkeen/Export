@@ -175,3 +175,53 @@
   - `node --check src/prompt-vault-feature.js`
   - `node --check src/title-updater-feature.js`
   - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 5 Goal
+- 仅迁移以下 4 个功能：`sidebarAutoHide`、`folderSpacing`、`markdownPatcher`、`snowEffect`。
+- 保持 feature 职责分离，并通过现有面板进行配置开关/参数调整。
+
+## Iteration 5 Plan
+- [x] 从 `gemini-voyager` 对应模块提取核心行为与存储策略。
+- [x] 新建独立模块：
+  - [x] `src/sidebar-autohide-feature.js`
+  - [x] `src/folder-spacing-feature.js`
+  - [x] `src/markdown-patcher-feature.js`
+  - [x] `src/snow-effect-feature.js`
+- [x] 在 `manifest` 注入上述模块，并在 `content-script` 装配层接入初始化与配置同步。
+- [x] 面板新增 4 项配置：
+  - [x] 侧边栏自动隐藏开关
+  - [x] 文件夹间距滑杆（0-16）
+  - [x] Markdown 修复增强开关
+  - [x] Snow Effect 开关
+- [x] 补充导出隔离（避免雪花 canvas 等扩展 UI 污染导出）。
+- [x] 完成语法检查与打包验证。
+
+## Iteration 5 Acceptance
+- [x] 开启侧边栏自动隐藏后：鼠标离开收起，移到左边缘可展开。
+- [x] 文件夹间距调节可实时生效且持久化。
+- [x] Markdown 修复可处理被节点打断的 `**bold**` 显示问题。
+- [x] Snow Effect 可开关、不卡交互、页面隐藏时暂停动画。
+- [x] 导出结果不包含雪花层和新增控制 UI。
+
+## Iteration 5 Review
+- 新增模块：
+  - `src/sidebar-autohide-feature.js`
+  - `src/folder-spacing-feature.js`
+  - `src/markdown-patcher-feature.js`
+  - `src/snow-effect-feature.js`
+- 装配改动：
+  - `manifest.json` 注入 4 个新 feature 脚本。
+  - `src/content-script.js` 增加存储键、状态、初始化、配置同步及面板区块。
+  - `src/styles.css` 增加 range 行样式与控制区样式补充。
+- 导出隔离：
+  - 新增对 `.ced-snow-effect-canvas` 的解析/快照/导出隐藏过滤。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/sidebar-autohide-feature.js`
+  - `node --check src/folder-spacing-feature.js`
+  - `node --check src/markdown-patcher-feature.js`
+  - `node --check src/snow-effect-feature.js`
+  - `node --check src/service-worker.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）

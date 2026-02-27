@@ -434,6 +434,25 @@
   color: var(--ced-text-soft);
 }
 
+.ced-range-row {
+  border: 1px solid var(--ced-border);
+  border-radius: var(--ced-radius-md);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 10px 11px;
+}
+
+.ced-range-row__input {
+  width: 100%;
+}
+
+.ced-range-row__value {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ced-text-soft);
+  text-align: right;
+}
+
 .ced-input {
   width: 100%;
   box-sizing: border-box;
