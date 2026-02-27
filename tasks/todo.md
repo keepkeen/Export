@@ -400,10 +400,35 @@
 - [x] 全局替换产品名称：`manifest`、popup 标题、面板标题、日志前缀、脚本产物命名。
 - [x] 重写 `README.md`，覆盖当前功能现状（时间线、公式复制、工作区、导出与打包）。
 - [x] 运行语法检查与打包验证，确认重命名后流程可用。
-- [ ] 提交并推送到 GitHub `origin/main`。
+- [x] 提交并推送到 GitHub `origin/main`。
 
 ## Iteration 10 Acceptance
 - [x] 扩展名称、popup、面板展示文案统一为 `ChronoChat Studio`。
 - [x] README 为完整项目文档，内容与当前实现一致。
 - [x] 打包脚本输出文件名切换为 `chronochat-studio.zip/.crx`。
-- [ ] 远端仓库已包含本次最新提交。
+- [x] 远端仓库已包含本次最新提交。
+
+## Iteration 10 Review
+- 命名统一：
+  - `manifest.json` 扩展名称与 action 标题改为 `ChronoChat Studio`。
+  - `src/popup.html` 标题与主标题改为 `ChronoChat Studio`。
+  - `src/content-script.js` 面板标题改为 `ChronoChat Studio`，副标题改为 `Timeline & Export`，日志前缀统一。
+  - `src/service-worker.js` 日志前缀统一为 `ChronoChat Studio`。
+- 文档重写：
+  - `README.md` 按正式 GitHub 项目结构重写：定位、能力、使用、构建、主文件、注意事项、许可证。
+- 脚本与产物命名：
+  - `scripts/build-crx.sh` 产物名改为 `dist/chronochat-studio.zip` / `dist/chronochat-studio.crx`。
+  - 默认签名 key 改为 `certs/chronochat-studio.pem`。
+- 辅助脚本命名同步：
+  - `scripts/generate-icons.py` 与 `scripts/dump_overview.py` 的项目描述改为新名称。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/formula-copy-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/service-worker.js`
+  - `python3 -m py_compile scripts/generate-icons.py scripts/dump_overview.py`
+  - `./scripts/build-crx.sh`
+- 发布：
+  - Commit: `37263da`
+  - Push: `origin/main` 已完成（`952e855..37263da`）。
