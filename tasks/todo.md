@@ -552,20 +552,111 @@
   - 产物：
     - `dist/chronochat-studio.zip`
     - `dist/chronochat-studio.crx`
-  - 默认签名 key 改为 `certs/chronochat-studio.pem`。
-- 辅助脚本命名同步：
-  - `scripts/generate-icons.py` 与 `scripts/dump_overview.py` 的项目描述改为新名称。
+
+---
+
+## Iteration 24 Goal
+- 重做扩展 popup 的桌面端布局，解决当前“过窄、过长、像移动表单”的问题。
+- 让 popup 在大屏上具备更成熟的双栏信息架构，并在窄尺寸下自动回落为单栏。
+
+## Iteration 24 Plan
+- [x] 审查当前 popup HTML/CSS 结构，确认哪些区域适合拆为双栏布局。
+- [x] 重构 popup 结构与样式，做桌面优先的自适应布局与控件栅格。
+- [x] 完成语法检查、打包验证，并更新 review 与 lessons。
+
+## Iteration 24 Review
+- 变更文件：
+  - `src/popup.html`
+  - `src/popup.css`
+  - `tasks/todo.md`
+  - `tasks/lessons.md`
+- 布局重构：
+  - popup 从单列长表单改为 `Top Summary + Dual Column Grid`，顶部保留品牌与当前页状态，主体拆成“实时体验”和“页面整理/本地联动”两列。
+  - 实时体验区采用两列控件栅格，减少滚动长度；清理与同步模块保持右侧堆叠，避免信息抢占主路径。
+  - 宽度由固定窄栏改为 `clamp(560px, 74vw, 760px)`，优先适配桌面扩展 popup；在 `720px` 和 `560px` 断点回退为单栏。
+- 视觉收敛：
+  - Header 与 Hero 独立成两张顶层卡片，补齐更成熟的首屏概览，不再像移动端表单直接堆字段。
+  - 统一 section、field、toggle、subsection 的圆角、阴影和栅格间距，降低视觉噪声。
 - 验证：
+  - `node --check src/popup.js`
+  - `./scripts/build-crx.sh`
+
+---
+
+## Iteration 25 Goal
+- 将当前“静态 HTML 归档块 + 轻量 viewer”重构为“原生 DOM 窗口化”。
+- 保留完整时间轴与摘要，同时默认仅保留最新 10 轮 live DOM，并在跳转到历史轮次时无缝恢复周边原生内容。
+- 进一步降低长会话下的 DOM 占用与刷新成本，避免归档/时间轴/导出三条链路互相拖慢。
+
+## Iteration 25 Plan
+- [x] 重构 ChatGPT 历史归档数据模型：从 `historyArchiveRounds` 轻量快照切换为完整 round index + 原生 DOM archive pool。
+- [x] 重写自动裁剪与恢复链路：默认最新 10 轮 live，历史跳转时恢复目标轮次前后窗口，移除轻量 viewer 主路径。
+- [x] 改造时间轴数据源与激活逻辑，改为读取完整 round index，而不是仅依赖 live DOM。
+- [x] 接上滚动/observer/新消息增量更新，保证自动无感归档不拖慢页面。
+- [x] 完成语法检查、打包验证，并补充 review。
+
+## Iteration 25 Review
+- 关键改动：
+  - `src/content-script.js`
+    - 新增 ChatGPT round store：完整保存每一轮的 `summary / turns / domNodes / spacer / live state`，时间轴和导出都改为基于该索引工作。
+    - 归档逻辑改为“真实 DOM 节点移入 detached archive pool”，不再渲染轻量 HTML viewer。
+    - 默认 latest window 为最近 10 轮；时间轴跳转到历史轮次时切换到 focus window（目标轮次前后窗口），并把真实 DOM 插回页面。
+    - 新增滚动驱动的历史恢复：当活动 marker 落到 archived round 时，自动调度窗口恢复，而不是让用户面对空白历史区。
+    - 渲染类导出前会暂时展开全部历史 round，导出完成后恢复窗口状态，避免截图/PDF/HTML 漏掉归档内容。
+    - 新增 `ced-history-cleaner-default-on-v1` 一次性迁移键，默认开启自动无感归档。
+  - `src/history-cleaner-feature.js`
+    - 裁剪器新增 `applyTrim` 钩子，模块本身只负责“计轮 + 调度 + 自动维持”，具体 DOM 裁剪委托给窗口管理器。
+  - `src/timeline-feature.js`
+    - 新增 `onActiveChange` 回调，时间轴活动 round 变化可反向驱动历史窗口恢复。
+    - archived marker 点击改为“先恢复再滚动”，降低跳转时的空占位感。
+  - `src/styles.css`
+    - 移除旧的 archive viewer 视觉，归档区只保留轻量 spacer 样式，恢复后不再显示扩展自绘卡片。
+  - `src/popup.js`
+    - 历史裁剪默认值迁移为自动维持最近 10 轮，和页面内新窗口策略保持一致。
+- 静态验证：
   - `node --check src/content-script.js`
-  - `node --check src/formula-copy-feature.js`
+  - `node --check src/history-cleaner-feature.js`
   - `node --check src/timeline-feature.js`
   - `node --check src/popup.js`
+  - `./scripts/build-crx.sh`
+- 待页面实测：
+  - ChatGPT 长会话下，滚动进入历史区时的恢复手感与滚动稳定性。
+  - 历史 round 恢复后，代码块/公式/复制等原生交互是否完整保持。
+  - 时间轴在“latest window / focus window”切换时的高亮与跳转精度。
+
+---
+
+## Iteration 26 Goal
+- 重新命名产品并重做图标，统一扩展品牌观感。
+- 修复 action popup 被浏览器尺寸限制后变成“窄带”的问题。
+- 将完整设置从 action popup 中拆出，改为“紧凑控制台 popup + 独立 options 页面”的成熟结构。
+
+## Iteration 26 Plan
+- [x] 统一新的产品命名，更新 manifest、README、popup/options 文案、日志前缀和打包产物名。
+- [x] 重写图标生成脚本并生成一套新的品牌图标。
+- [x] 新建 options 页面承载完整设置，action popup 改为紧凑布局，仅保留高频控制与入口按钮。
+- [x] 完成语法检查、打包验证，并补充 review。
+
+## Iteration 26 Review
+- 品牌与产物：
+  - `manifest.json` 名称与 action 标题统一为 `ThreadAtlas`，描述改为 thread-first workspace/export 定位。
+  - `src/content-script.js`、`src/service-worker.js`、`scripts/dump_overview.py` 的用户可见文案与日志前缀同步改名。
+  - `scripts/build-crx.sh` 输出改为 `dist/threadatlas.zip` / `dist/threadatlas.crx`，并增加旧 key `certs/chronochat-studio.pem` 的兼容回退，避免本地扩展 ID 无谓漂移。
+  - `README.md` 重写为新品牌文档，并同步更新 action popup / options page / 原生归档恢复的当前架构说明。
+- popup / options 架构：
+  - `src/popup.html` + `src/popup.css` 重构为 420px 紧凑控制台，只保留状态摘要、高频开关、历史裁剪、本地同步和“完整设置”入口。
+  - `src/options.html` + `src/options.css` 承载完整设置页，避免浏览器 action popup 的尺寸上限把表单挤成窄带。
+  - `src/popup.js` 新增 `open-settings` 绑定，通过 `chrome.runtime.openOptionsPage()` 打开完整设置页，并继续复用现有实时设置下发链路。
+- 图标：
+  - `scripts/generate-icons.py` 改为 `ThreadAtlas` 新图标生成器，图形语言为深色 atlas/orbit 背景 + thread 节点主干，并对小尺寸图标额外加粗简化。
+  - 已重新生成 `icons/icon-16.png` / `32` / `48` / `128`。
+- 静态验证：
+  - `node --check src/popup.js`
+  - `node --check src/content-script.js`
   - `node --check src/service-worker.js`
+  - `node --check src/timeline-feature.js`
   - `python3 -m py_compile scripts/generate-icons.py scripts/dump_overview.py`
   - `./scripts/build-crx.sh`
-- 发布：
-  - Commit: `37263da`
-  - Push: `origin/main` 已完成（`952e855..37263da`）。
 
 ---
 

@@ -1,90 +1,91 @@
-# ChronoChat Studio
+# ThreadAtlas
 
-ChronoChat Studio is a Chrome/Edge Manifest V3 extension for ChatGPT-first conversation navigation, workspace enhancement, and export.
+ThreadAtlas is a Chrome/Edge Manifest V3 extension for thread-first navigation, workspace organization, and export across modern chat products.
 
-The project currently focuses on delivering the strongest experience on ChatGPT. Gemini, Claude, and Grok are still supported for export-oriented flows, but most advanced workspace features are implemented for ChatGPT first.
+The product is intentionally ChatGPT-first for advanced interaction design. Gemini, Claude, and Grok remain supported for export-oriented flows, while the richer workspace layer is tuned primarily for ChatGPT.
 
 ## Highlights
 
-### ChatGPT
+### ChatGPT-first workspace
 
 - Right-side timeline navigation
-  - Uniform marker distribution for long conversations
-  - Fast jump / flow scroll modes
-  - Preview panel with search
-  - Star / level markers
-  - Active marker tracking while scrolling
-- Archived history timeline
-  - History Cleaner trims old conversation DOM to keep the page lighter
-  - Old rounds stay on the timeline as archived markers
-  - Clicking an archived marker jumps to a lightweight placeholder and restores that round on demand
+  - Uniform round distribution for long conversations
+  - `flow` / `jump` scroll modes
+  - Active round tracking while scrolling
+  - Preview and export workspace around the timeline
+- Native archived history windowing
+  - The extension builds a full round index when a conversation loads
+  - Only the latest window stays live by default, older rounds are archived into an in-memory pool
+  - Clicking an archived marker restores native ChatGPT DOM around that round instead of showing an extension-only lightweight viewer
+  - Default strategy keeps the latest `10` rounds live and restores a focused window around historical targets on demand
 - Formula copy
-  - Hover highlights the formula body only
+  - Hover only highlights the formula body
   - Click to copy instantly
-  - Copy formats: `LaTeX`, `LaTeX (No $)`, `MathML`
-- Workspace enhancements
-  - Folder manager in the native ChatGPT sidebar
+  - Formats: `LaTeX`, `LaTeX (No $)`, `MathML`
+- Workspace modules
+  - Sidebar folders inside the native ChatGPT sidebar
   - Prompt Vault
   - Title Updater
   - Sidebar auto-hide
   - Folder spacing control
   - Markdown patcher
   - Snow effect
-- Export workflow
+  - History Cleaner policy controls
+- Export
   - In-page export panel with turn selection
-  - Timeline-side quick export controls
+  - Timeline-side preview/export affordances
   - Formats: `txt`, `md`, `png`, `pdf`, `doc`, `html`, `json`, `xls`, `csv`
 
 ### Other supported sites
 
-- Export-oriented support for:
-  - ChatGPT (`chatgpt.com`, `chat.openai.com`)
-  - Gemini (`gemini.google.com`)
-  - Claude (`claude.ai`, `*.claude.ai`)
-  - Grok (`grok.com`, `*.grok.com`)
-- Advanced timeline / workspace modules should be treated as ChatGPT-priority features unless explicitly documented otherwise.
+- Supported hosts:
+  - `chatgpt.com`, `chat.openai.com`
+  - `gemini.google.com`
+  - `claude.ai`, `*.claude.ai`
+  - `grok.com`, `*.grok.com`
+- Export flows work across these hosts. ChatGPT receives the primary investment for timeline, folders, archive recovery, and other workspace behaviors.
 
-## Product Layout
+## UI model
 
-- Extension popup
-  - Real-time settings and status overview
-  - History Cleaner controls
-  - Context Sync controls
-- In-page export panel
-  - Export overview
-  - File naming
-  - Turn selection
-  - Export actions
-- In-page timeline
-  - Navigation
-  - Preview / export workspace
-  - Archived history restoration
+- Action popup
+  - Compact, high-frequency control surface
+  - Current-page status summary
+  - Quick toggles for timeline, archive policy, formula copy, and local sync
+  - Entry point to the full settings page
+- Options page
+  - Full settings center for long-form configuration
+  - Better suited to browser extension layout constraints than overloading the action popup
+- In-page UI
+  - Right-side timeline
+  - In-page export panel
+  - Sidebar folder grouping inside ChatGPT
 
-## Current Interaction Model
+## Interaction model
 
 1. Open a supported chat page.
-2. Use the extension popup to adjust live settings.
-3. Use the in-page timeline to navigate the conversation.
-4. Use History Cleaner when the page becomes too heavy.
-5. Click archived markers to reopen old rounds only when needed.
-6. Export selected turns from the panel or from the timeline quick export area.
+2. Use the action popup for quick toggles and page status.
+3. Open the options page when you need the full settings surface.
+4. Use the in-page timeline to move across rounds.
+5. Let the archive windowing keep the page light while preserving complete timeline history.
+6. Export from the in-page panel when you need a durable artifact.
 
-## History Cleaner + Archived Timeline
+## History windowing
 
-ChronoChat Studio does not treat cleanup as simple deletion anymore.
+ThreadAtlas does not treat cleanup as simple deletion.
 
-Current behavior on ChatGPT:
+On ChatGPT, the extension now separates round indexing from live DOM presence:
 
-- Old rounds are converted into lightweight archived placeholders before DOM cleanup.
-- The timeline keeps full historical markers instead of collapsing to only visible rounds.
-- Archived markers jump to placeholders and restore archived content on demand.
-- Restored archived content uses the extension's lightweight viewer, not a full recreation of native ChatGPT controls.
+- A complete round index is built for the conversation.
+- Older rounds can be archived out of the visible DOM into an in-memory archive pool.
+- The page keeps lightweight spacers so scroll mapping and timeline positions remain stable.
+- When you jump to an archived round, the extension restores the surrounding native ChatGPT nodes and then scrolls to the real round.
+- Returning to the latest area re-applies the latest live window policy.
 
-Current limitation:
+Current boundaries:
 
-- Archived history is stored in page memory for the active session.
-- Refreshing the page returns to the host page's original thread state.
-- Export still follows the current live turn set; archived placeholder content is not yet merged into export output.
+- Archive state lives in the current tab memory only.
+- Refreshing the page rebuilds the round index from the host page again.
+- Browser-page interaction still needs real-page validation after changes because host DOMs shift frequently.
 
 ## Installation
 
@@ -103,22 +104,24 @@ Current limitation:
 
 Outputs:
 
-- `dist/chronochat-studio.zip`
-- `dist/chronochat-studio.crx`
+- `dist/threadatlas.zip`
+- `dist/threadatlas.crx`
 
 Optional environment variables:
 
 - `CHROME_BIN=/path/to/chrome`
 - `KEY_PATH=/path/to/private-key.pem`
 
-## Main Files
+## Main files
 
 - `manifest.json`
 - `src/content-script.js`
 - `src/service-worker.js`
 - `src/popup.html`
-- `src/popup.js`
 - `src/popup.css`
+- `src/popup.js`
+- `src/options.html`
+- `src/options.css`
 - `src/timeline-feature.js`
 - `src/history-cleaner-feature.js`
 - `src/formula-copy-feature.js`
@@ -134,8 +137,8 @@ Optional environment variables:
 ## Notes
 
 - ChatGPT is the primary target for timeline and workspace behavior.
-- Host sites change DOM frequently; selectors and mount points may need maintenance.
-- Very long conversations still cost time when first parsed or exported.
+- Host DOMs change frequently; selectors and mount points still require maintenance.
+- Static validation and packaging can be automated here, but real browser interaction still needs page-level verification.
 - All export and enhancement logic runs locally inside the extension context.
 
 ## License

@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ThreadAtlas Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body class="options-page">
+    <main class="popup">
+      <section class="popup__top">
+        <header class="popup__header">
+          <div>
+            <p class="popup__eyebrow">Thread Workspace</p>
+            <h1 class="popup__title">ThreadAtlas</h1>
+            <p class="popup__hint" id="popup-tab-hint">当前页：检测中...</p>
+          </div>
+          <span class="popup-badge popup-badge--soft" id="popup-site-badge">检测中</span>
+        </header>
+
+        <section class="popup__hero">
+          <div class="popup__hero-badges">
+            <span class="popup-badge popup-badge--accent">完整设置页</span>
+            <span class="popup-badge popup-badge--soft" id="popup-live-badge">等待连接</span>
+          </div>
+          <h2 class="popup__hero-title">全量设置与状态中心</h2>
+          <p class="popup__hero-desc" id="popup-summary">正在分析当前页面状态与可用能力。</p>
+          <div class="popup__hero-stats">
+            <div class="popup-stat">
+              <span class="popup-stat__label">时间轴</span>
+              <strong class="popup-stat__value" id="popup-stat-timeline">-</strong>
+            </div>
+            <div class="popup-stat">
+              <span class="popup-stat__label">滚动模式</span>
+              <strong class="popup-stat__value" id="popup-stat-scroll-mode">-</strong>
+            </div>
+            <div class="popup-stat">
+              <span class="popup-stat__label">本地同步</span>
+              <strong class="popup-stat__value" id="popup-stat-sync">-</strong>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="popup__grid">
+        <section class="popup__section popup__section--experience">
+          <div class="section-head">
+            <h2 class="section-title">实时体验</h2>
+            <p class="section-desc">高频可见设置。修改后会立即推送到已打开的聊天页面。</p>
+          </div>
+          <div class="popup__controls popup__controls--experience">
+            <label class="field field--span-2">
+              <span class="field__label">公式复制格式</span>
+              <span class="field__hint">点击公式即可复制，适合不同编辑器和文档场景。</span>
+              <select id="setting-formula-format"></select>
+            </label>
+            <label class="toggle-field">
+              <input id="setting-timeline-enabled" type="checkbox">
+              <span class="toggle-field__meta">
+                <span class="toggle-field__title">启用时间轴</span>
+                <span class="toggle-field__hint">右侧显示会话导航与快速跳转。</span>
+              </span>
+            </label>
+            <label class="field">
+              <span class="field__label">时间线滚动模式</span>
+              <span class="field__hint">Flow 平滑过渡，Jump 直接定位。</span>
+              <select id="setting-timeline-scroll-mode"></select>
+            </label>
+            <label class="toggle-field">
+              <input id="setting-title-updater-enabled" type="checkbox">
+              <span class="toggle-field__meta">
+                <span class="toggle-field__title">标签标题同步</span>
+                <span class="toggle-field__hint">让浏览器标签页跟随当前会话标题。</span>
+              </span>
+            </label>
+            <label class="toggle-field">
+              <input id="setting-title-updater-include-folder" type="checkbox">
+              <span class="toggle-field__meta">
+                <span class="toggle-field__title">标题包含文件夹前缀</span>
+                <span class="toggle-field__hint">在多项目并行时更容易识别标签页。</span>
+              </span>
+            </label>
+            <label class="toggle-field">
+              <input id="setting-sidebar-autohide-enabled" type="checkbox">
+              <span class="toggle-field__meta">
+                <span class="toggle-field__title">侧边栏自动隐藏</span>
+                <span class="toggle-field__hint">离开侧栏后自动收起，靠近左边缘再展开。</span>
+              </span>
+            </label>
+            <label class="toggle-field">
+              <input id="setting-markdown-patcher-enabled" type="checkbox">
+              <span class="toggle-field__meta">
+                <span class="toggle-field__title">Markdown 修复增强</span>
+                <span class="toggle-field__hint">修补被渲染节点打断的粗体等语法。</span>
+              </span>
+            </label>
+            <label class="toggle-field">
+              <input id="setting-snow-effect-enabled" type="checkbox">
+              <span class="toggle-field__meta">
+                <span class="toggle-field__title">Snow Effect</span>
+                <span class="toggle-field__hint">默认开启的轻量装饰效果，可随时关闭。</span>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <div class="popup__side-stack">
+          <section class="popup__section popup__section--cleanup">
+            <div class="section-head">
+              <h2 class="section-title">页面整理</h2>
+              <p class="section-desc">用于整理长会话和侧栏分组的结构设置。</p>
+            </div>
+            <div class="popup__controls popup__controls--cleanup">
+              <label class="field field--span-2">
+                <span class="field__label">文件夹层级间距</span>
+                <span class="field__hint">调整左侧文件夹分组之间的视觉呼吸感。</span>
+                <div class="range-field">
+                  <input id="setting-folder-spacing" type="range" min="0" max="16" step="1">
+                  <span id="setting-folder-spacing-value">2px</span>
+                </div>
+              </label>
+              <div class="subsection-card field--span-2">
+                <div class="subsection-card__head">
+                  <h3 class="subsection-card__title">History Cleaner</h3>
+                  <p class="subsection-card__desc">只保留最近 N 轮对话，适合超长会话阅读与性能控制。</p>
+                </div>
+                <label class="field">
+                  <span class="field__label">保留最近轮数</span>
+                  <span class="field__hint">仅影响当前页面显示，刷新页面可恢复完整对话。</span>
+                  <input id="setting-history-cleaner-keep-rounds" type="number" min="1" max="100" step="1">
+                </label>
+                <label class="toggle-field">
+                  <input id="setting-history-cleaner-auto-maintain" type="checkbox">
+                  <span class="toggle-field__meta">
+                    <span class="toggle-field__title">自动维持最近 N 轮</span>
+                    <span class="toggle-field__hint">适合持续聊天时自动清理过旧内容。</span>
+                  </span>
+                </label>
+                <div class="action-row">
+                  <button id="history-cleaner-check" class="secondary-button" type="button">查看当前轮数</button>
+                  <button id="history-cleaner-trim" class="sync-button" type="button">裁剪旧对话</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="popup__section popup__section--sync">
+            <div class="section-head">
+              <h2 class="section-title">本地联动</h2>
+              <p class="section-desc">与本地服务协同工作。适合上下文同步和外部工具接入。</p>
+            </div>
+            <div class="popup__controls popup__controls--sync">
+              <label class="toggle-field toggle-field--span-2">
+                <input id="setting-context-sync-enabled" type="checkbox">
+                <span class="toggle-field__meta">
+                  <span class="toggle-field__title">启用本地同步</span>
+                  <span class="toggle-field__hint">通过本地 HTTP 服务接收当前会话上下文。</span>
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">端口</span>
+                <span class="field__hint">默认同步到 127.0.0.1:{port}/sync。</span>
+                <input id="setting-context-sync-port" type="number" min="1" max="65535" step="1">
+              </label>
+              <div class="sync-row field--span-2">
+                <span id="context-sync-online" class="sync-pill is-offline">离线</span>
+                <button id="context-sync-push" class="sync-button" type="button">同步当前会话</button>
+              </div>
+              <p class="popup__note">当当前页不是受支持的聊天站点时，设置仍会保存，但动作按钮不会执行。</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <footer class="popup__footer" id="popup-status"></footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

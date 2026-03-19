@@ -11,6 +11,7 @@ const STORAGE_KEYS = {
   snowEffectEnabled: 'ced-snow-effect-enabled',
   historyCleanerKeepRounds: 'ced-history-cleaner-keep-rounds',
   historyCleanerAutoMaintain: 'ced-history-cleaner-auto-maintain',
+  historyCleanerDefaultOnApplied: 'ced-history-cleaner-default-on-v1',
   contextSyncEnabled: 'ced-context-sync-enabled',
   contextSyncPort: 'ced-context-sync-port',
 };
@@ -38,7 +39,8 @@ const DEFAULTS = {
   [STORAGE_KEYS.markdownPatcherEnabled]: true,
   [STORAGE_KEYS.snowEffectEnabled]: true,
   [STORAGE_KEYS.historyCleanerKeepRounds]: 10,
-  [STORAGE_KEYS.historyCleanerAutoMaintain]: false,
+  [STORAGE_KEYS.historyCleanerAutoMaintain]: true,
+  [STORAGE_KEYS.historyCleanerDefaultOnApplied]: false,
   [STORAGE_KEYS.contextSyncEnabled]: false,
   [STORAGE_KEYS.contextSyncPort]: 3030,
 };
@@ -102,6 +104,7 @@ const els = {
   contextSyncPush: document.getElementById('context-sync-push'),
   historyCleanerCheck: document.getElementById('history-cleaner-check'),
   historyCleanerTrim: document.getElementById('history-cleaner-trim'),
+  openSettings: document.getElementById('open-settings'),
 };
 
 init().catch((error) => {
@@ -114,6 +117,7 @@ async function init() {
   await hydrateActiveTab();
   await hydrateSettings();
   bindEvents();
+  bindOpenSettingsAction();
   bindContextSyncActions();
   bindHistoryCleanerActions();
   renderSettings();
@@ -172,6 +176,12 @@ async function hydrateSettings() {
     missingPatch[STORAGE_KEYS.timelineDefaultOnApplied] = true;
     stored[STORAGE_KEYS.timelineEnabled] = true;
     stored[STORAGE_KEYS.timelineDefaultOnApplied] = true;
+  }
+  if (stored[STORAGE_KEYS.historyCleanerDefaultOnApplied] !== true) {
+    missingPatch[STORAGE_KEYS.historyCleanerAutoMaintain] = true;
+    missingPatch[STORAGE_KEYS.historyCleanerDefaultOnApplied] = true;
+    stored[STORAGE_KEYS.historyCleanerAutoMaintain] = true;
+    stored[STORAGE_KEYS.historyCleanerDefaultOnApplied] = true;
   }
 
   if (Object.keys(missingPatch).length) {
@@ -505,6 +515,22 @@ function normalizePort(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 3030;
   return Math.max(1, Math.min(65535, Math.round(numeric)));
+}
+
+function bindOpenSettingsAction() {
+  if (!(els.openSettings instanceof HTMLButtonElement)) return;
+  els.openSettings.addEventListener('click', async () => {
+    try {
+      if (typeof chrome.runtime.openOptionsPage === 'function') {
+        await chrome.runtime.openOptionsPage();
+      } else {
+        window.open(chrome.runtime.getURL('src/options.html'), '_blank', 'noopener');
+      }
+      window.close();
+    } catch (error) {
+      setStatus(error?.message || '无法打开完整设置', true);
+    }
+  });
 }
 
 function bindContextSyncActions() {

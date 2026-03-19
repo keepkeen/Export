@@ -10,6 +10,7 @@
     debounceMs: 260,
     getTurns: null,
     getObserveTarget: null,
+    applyTrim: null,
     messageTurnSelector: '[data-testid^="conversation-turn-"], article',
     beforeTrim: null,
     onTrim: null,
@@ -213,38 +214,60 @@
 
       const removableTurns = turns.slice(0, startIndex);
       const retainedTurns = turns.slice(startIndex);
-      if (typeof this.options.beforeTrim === 'function') {
-        try {
-          this.options.beforeTrim({
-            allTurns: turns,
-            removableTurns,
-            retainedTurns,
-            keepRounds: nextKeepRounds,
-            autoMaintain: options.autoMaintain === true,
-          });
-        } catch (_error) {
-          // ignore archive preparation failure and continue trimming
-        }
-      }
-      this.isApplyingTrim = true;
-      removableTurns.forEach((turn) => {
-        turn.node.remove();
-      });
-      setTimeout(() => {
-        this.isApplyingTrim = false;
-      }, 0);
-
-      const remainingTurns = this.collectTurns();
-      const remainingRounds = this.countRounds(remainingTurns);
-      const result = {
-        ok: true,
-        message: `已裁剪旧对话，当前保留 ${remainingRounds} 轮`,
-        rounds: remainingRounds,
-        messages: remainingTurns.length,
-        removedMessages: removableTurns.length,
-        removedRounds: Math.max(0, beforeRounds - remainingRounds),
+      const payload = {
+        allTurns: turns,
+        removableTurns,
+        retainedTurns,
+        keepRounds: nextKeepRounds,
         autoMaintain: options.autoMaintain === true,
       };
+
+      let result = null;
+      this.isApplyingTrim = true;
+      try {
+        if (typeof this.options.applyTrim === 'function') {
+          result = this.options.applyTrim(payload) || null;
+        } else {
+          if (typeof this.options.beforeTrim === 'function') {
+            try {
+              this.options.beforeTrim(payload);
+            } catch (_error) {
+              // ignore archive preparation failure and continue trimming
+            }
+          }
+          removableTurns.forEach((turn) => {
+            turn.node.remove();
+          });
+
+          const remainingTurns = this.collectTurns();
+          const remainingRounds = this.countRounds(remainingTurns);
+          result = {
+            ok: true,
+            message: `已裁剪旧对话，当前保留 ${remainingRounds} 轮`,
+            rounds: remainingRounds,
+            messages: remainingTurns.length,
+            removedMessages: removableTurns.length,
+            removedRounds: Math.max(0, beforeRounds - remainingRounds),
+            autoMaintain: options.autoMaintain === true,
+          };
+        }
+      } finally {
+        setTimeout(() => {
+          this.isApplyingTrim = false;
+        }, 0);
+      }
+
+      if (!result || typeof result !== 'object') {
+        result = {
+          ok: false,
+          message: '裁剪执行失败',
+          rounds: beforeRounds,
+          messages: turns.length,
+          removedMessages: 0,
+          removedRounds: 0,
+          autoMaintain: options.autoMaintain === true,
+        };
+      }
 
       if (typeof this.options.onTrim === 'function') {
         try {

@@ -30,6 +30,7 @@
     getExportConfig: null,
     onExportConfigChange: null,
     onExportNow: null,
+    onActiveChange: null,
     messageTurnSelector: '[data-testid^="conversation-turn-"], article',
     userRoleSelector: '[data-message-author-role="user"]',
   };
@@ -714,6 +715,7 @@
             element: item.node,
             summary: clipText(item.summary || item.text || `Turn ${index + 1}`, 96),
             index,
+            roundIndex: Number.isFinite(Number(item.roundIndex)) ? Number(item.roundIndex) : index,
             starred: meta.starred === true,
             level,
             archived: item.archived === true,
@@ -911,6 +913,25 @@
         this.syncDotState(marker);
       });
       this.highlightPreviewActiveItem();
+      this.emitActiveChange();
+    }
+
+    emitActiveChange() {
+      if (typeof this.options.onActiveChange !== 'function') return;
+      const marker = this.markers[this.activeIndex];
+      if (!marker) return;
+      try {
+        this.options.onActiveChange({
+          id: marker.id,
+          index: marker.index,
+          roundIndex: marker.roundIndex,
+          summary: marker.summary,
+          archived: marker.archived === true,
+          restored: marker.restored === true,
+        });
+      } catch (_error) {
+        // ignore host callback failure
+      }
     }
 
     scheduleActiveIndex(nextIndex) {
@@ -1021,6 +1042,16 @@
       const nextIndex = resolvedIndex >= 0 ? resolvedIndex : targetIndex;
       this.setActiveIndex(nextIndex);
 
+      let activatedBeforeScroll = false;
+      if (marker.archived === true && typeof marker.onActivate === 'function') {
+        this.activateMarker(marker, nextIndex);
+        this.refresh();
+        marker = this.resolveMarkerTarget(nextIndex, markerId) || this.resolveMarkerTarget(targetIndex, markerId) || marker;
+        activatedBeforeScroll = true;
+      }
+
+      if (!marker?.element) return;
+
       const viewportOffset = Math.round(this.getContainerClientHeight() * 0.18);
       const targetTop = Math.max(0, this.getElementOffsetTopInContainer(marker.element) - viewportOffset);
       const startTop = this.getContainerScrollTop();
@@ -1030,7 +1061,9 @@
         if (Math.abs(currentTop - targetTop) > 20) {
           marker.element.scrollIntoView({ behavior: 'auto', block: 'center' });
         }
-        this.activateMarker(marker, nextIndex);
+        if (!activatedBeforeScroll) {
+          this.activateMarker(marker, nextIndex);
+        }
         this.computeMarkerTops();
         this.setActiveIndex(nextIndex);
         this.lastActiveChangeAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')

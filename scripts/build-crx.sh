@@ -4,11 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 UNPACKED="$DIST/unpacked"
-ZIP_PATH="$DIST/chronochat-studio.zip"
-CRX_PATH="$DIST/chronochat-studio.crx"
+ZIP_PATH="$DIST/threadatlas.zip"
+CRX_PATH="$DIST/threadatlas.crx"
 PROFILE_DIR="$DIST/.chrome-profile"
-DEFAULT_KEY="$ROOT/certs/chronochat-studio.pem"
+DEFAULT_KEY="$ROOT/certs/threadatlas.pem"
+LEGACY_KEY="$ROOT/certs/chronochat-studio.pem"
 KEY_PATH="${KEY_PATH:-$DEFAULT_KEY}"
+if [[ "$KEY_PATH" == "$DEFAULT_KEY" && ! -f "$KEY_PATH" && -f "$LEGACY_KEY" ]]; then
+  KEY_PATH="$LEGACY_KEY"
+fi
 
 rm -rf "$UNPACKED" "$ZIP_PATH" "$CRX_PATH" "$PROFILE_DIR"
 mkdir -p "$UNPACKED" "$DIST"
@@ -57,7 +61,7 @@ if [[ -z "$BROWSER_BIN" ]]; then
 ⚠️  未找到可用于打包 CRX 的 Chrome/Edge 可执行文件。
 请安装 Chromium 内核浏览器，并设置环境变量 CHROME_BIN 指向其可执行文件，
 或者手动运行：
-  /path/to/chrome --pack-extension=dist/unpacked --pack-extension-key=certs/chronochat-studio.pem
+  /path/to/chrome --pack-extension=dist/unpacked --pack-extension-key=certs/threadatlas.pem
 MSG
   exit 0
 fi

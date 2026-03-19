@@ -139,12 +139,15 @@
     snowEffectEnabled: 'ced-snow-effect-enabled',
     historyCleanerKeepRounds: 'ced-history-cleaner-keep-rounds',
     historyCleanerAutoMaintain: 'ced-history-cleaner-auto-maintain',
+    historyCleanerDefaultOnApplied: 'ced-history-cleaner-default-on-v1',
     contextSyncEnabled: 'ced-context-sync-enabled',
     contextSyncPort: 'ced-context-sync-port'
   };
 
   const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
   const IMAGE_TOKEN_SUFFIX = '__';
+  const HISTORY_FOCUS_RELOAD_KEY = '__ced-history-focus-reload-v1';
+  const HISTORY_FOCUS_RADIUS = 3;
 
   const SITE_KEYS = {
     chatgpt: 'chatgpt',
@@ -356,13 +359,22 @@
     markdownPatcherEnabled: true,
     snowEffectEnabled: true,
     historyCleanerKeepRounds: 10,
-    historyCleanerAutoMaintain: false,
+    historyCleanerAutoMaintain: true,
     contextSyncEnabled: false,
     contextSyncPort: 3030,
     historyArchiveConversationKey: '',
     historyArchiveRounds: [],
+    historyArchivePoolEl: null,
     historyArchiveVersion: 0,
     historyArchiveOpenMarkerId: '',
+    historyArchiveWindowMode: 'latest',
+    historyArchiveWindowStart: 0,
+    historyArchiveWindowEnd: -1,
+    historyArchiveIndexReady: false,
+    historyArchiveApplyingWindow: false,
+    historyArchiveFocusTimer: null,
+    historyArchiveSyncTimer: null,
+    historyArchiveActiveMarkerId: '',
     timelineMounting: false,
     timelineRefreshTimer: null,
     heavyRefreshTimer: null,
@@ -430,7 +442,7 @@
     });
   }
 
-  init().catch((error) => console.error('[ChronoChat Studio] init failed', error));
+  init().catch((error) => console.error('[ThreadAtlas] init failed', error));
 
   async function init() {
     await ensureDocumentReady();
@@ -440,7 +452,6 @@
     injectToast();
     bindHistoryArchiveEvents();
     initFormulaCopyFeature();
-    initHistoryCleanerFeature();
     initTimelineFeature();
     registerTimelineVisibilityWatch();
     scheduleTimelineEnsure(0);
@@ -453,6 +464,8 @@
     initSnowEffectFeature();
     attachPanel();
     await refreshConversationData();
+    initHistoryCleanerFeature();
+    maybeRestorePendingHistoryFocus();
     observeConversation();
   }
 
@@ -521,6 +534,7 @@
       [STORAGE_KEYS.snowEffectEnabled]: state.snowEffectEnabled,
       [STORAGE_KEYS.historyCleanerKeepRounds]: state.historyCleanerKeepRounds,
       [STORAGE_KEYS.historyCleanerAutoMaintain]: state.historyCleanerAutoMaintain,
+      [STORAGE_KEYS.historyCleanerDefaultOnApplied]: false,
       [STORAGE_KEYS.contextSyncEnabled]: state.contextSyncEnabled,
       [STORAGE_KEYS.contextSyncPort]: state.contextSyncPort
     };
@@ -574,6 +588,12 @@
     }
     if (typeof stored[STORAGE_KEYS.historyCleanerAutoMaintain] === 'boolean') {
       state.historyCleanerAutoMaintain = stored[STORAGE_KEYS.historyCleanerAutoMaintain];
+    }
+    const historyCleanerDefaultApplied = stored[STORAGE_KEYS.historyCleanerDefaultOnApplied] === true;
+    if (!historyCleanerDefaultApplied) {
+      state.historyCleanerAutoMaintain = true;
+      persist(STORAGE_KEYS.historyCleanerAutoMaintain, true);
+      persist(STORAGE_KEYS.historyCleanerDefaultOnApplied, true);
     }
     if (typeof stored[STORAGE_KEYS.contextSyncEnabled] === 'boolean') {
       state.contextSyncEnabled = stored[STORAGE_KEYS.contextSyncEnabled];
@@ -640,7 +660,7 @@
     panel.innerHTML = `
       <div class="ced-panel__header">
         <div class="ced-panel__title-wrap">
-          <div class="ced-panel__title">ChronoChat Studio</div>
+          <div class="ced-panel__title">ThreadAtlas</div>
           <div class="ced-panel__subtitle">Timeline & Export</div>
         </div>
         <button class="ced-button ced-button--ghost" data-ced-action="close">✕</button>
@@ -1117,7 +1137,9 @@
     state.pageTitle = detectConversationTitle();
     if (state.nameInput) state.nameInput.placeholder = state.pageTitle || ACTIVE_SITE.defaultTitle;
 
-    const turns = collectConversationTurns();
+    const turns = SITE_KEY === SITE_KEYS.chatgpt
+      ? collectConversationTurnsForChatGpt()
+      : collectConversationTurns();
     state.turns = turns;
 
     const nextSelection = new Set();
@@ -1136,7 +1158,12 @@
     state.selectedTurnIds = nextSelection;
 
     if (token === state.lastRefreshToken) {
-      updateTurnList();
+      if (isExportPanelOpen() || state.exporting) {
+        updateTurnList();
+      } else {
+        refreshPanelOverview();
+        refreshActionSection();
+      }
       refreshTimelineFeature();
       refreshFolderFeature();
       refreshTitleUpdaterFeature();
@@ -1641,6 +1668,7 @@
         getExportConfig: getTimelineExportConfig,
         onExportConfigChange: applyTimelineExportConfigPatch,
         onExportNow: triggerTimelineQuickExport,
+        onActiveChange: handleTimelineActiveMarkerChange,
         messageTurnSelector: SELECTORS.MESSAGE_TURN,
         userRoleSelector: SELECTORS.ROLE_USER,
         scrollContainerSelectors: SCROLL_CONTAINER_SELECTORS
@@ -1660,6 +1688,7 @@
     window.__cedTimeline?.configure?.({
       enabled: state.timelineEnabled,
       scrollMode: state.timelineScrollMode,
+      onActiveChange: handleTimelineActiveMarkerChange,
     });
     if (state.timelineEnabled) {
       scheduleTimelineEnsure(0);
@@ -1786,15 +1815,60 @@
       .filter((node) => node instanceof HTMLElement);
   }
 
+  function collectConversationTurnsForChatGpt() {
+    const domTurns = collectConversationTurns();
+    if (!domTurns.length) {
+      return collectTurnsFromHistoryRounds();
+    }
+    syncHistoryRoundStore(domTurns);
+    if (state.historyCleanerAutoMaintain && state.historyArchiveWindowMode === 'latest') {
+      applyLatestHistoryWindow({
+        keepRounds: state.historyCleanerKeepRounds,
+        anchorMarkerId: state.historyArchiveOpenMarkerId || ''
+      });
+    }
+    return collectTurnsFromHistoryRounds();
+  }
+
   function collectTimelineTurnsFast() {
+    syncHistoryArchiveContext();
+    if (SITE_KEY === SITE_KEYS.chatgpt && state.historyArchiveRounds.length) {
+      const turns = state.historyArchiveRounds
+        .map((round) => {
+          const anchor = getHistoryRoundAnchorNode(round);
+          if (!(anchor instanceof HTMLElement)) return null;
+          return {
+            id: round.markerId,
+            role: round.role || 'user',
+            node: anchor,
+            text: round.summary || '',
+            preview: round.summary || '',
+            archived: round.live !== true && round.wasArchived === true,
+            restored: round.live === true && round.wasArchived === true,
+            roundIndex: round.roundIndex,
+            onActivate: () => focusHistoryRound(round.markerId, { source: 'timeline' }),
+          };
+        })
+        .filter(Boolean);
+
+      const firstId = turns[0]?.id || '';
+      const lastId = turns[turns.length - 1]?.id || '';
+      const tailSummary = String(turns[turns.length - 1]?.preview || '').slice(0, 80);
+      const signature = `${location.pathname}|round-store|${turns.length}|${firstId}|${lastId}|${tailSummary}|${state.historyArchiveVersion}`;
+      if (state.timelineTurnsCache.signature === signature && Array.isArray(state.timelineTurnsCache.turns) && state.timelineTurnsCache.turns.length) {
+        return state.timelineTurnsCache.turns;
+      }
+      state.timelineTurnsCache = { signature, turns };
+      return turns;
+    }
+
     const nodes = collectConversationTurnNodesFast();
-    const archivedTurns = collectArchivedTimelineTurns();
-    if (!nodes.length && !archivedTurns.length) {
+    if (!nodes.length) {
       state.timelineTurnsCache = { signature: '', turns: [] };
       return [];
     }
 
-    const liveTurns = nodes.map((node, index) => {
+    const turns = nodes.map((node, index) => {
       const role = detectNodeRole(node);
       const contentNode = resolveContentNode(node, role) || node;
       const text = getTimelineSummaryText(contentNode);
@@ -1809,33 +1883,34 @@
         preview: text,
         archived: false,
         restored: false,
+        roundIndex: index,
       };
     }).filter((turn) => turn.node instanceof HTMLElement);
 
-    const combined = [...archivedTurns, ...liveTurns]
-      .filter((turn) => turn?.node instanceof HTMLElement)
-      .sort((a, b) => {
-        if (a.node === b.node) return 0;
-        const position = a.node.compareDocumentPosition(b.node);
-        if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-        if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-        return 0;
-      });
-
-    const firstId = combined[0]?.id || '';
-    const lastId = combined[combined.length - 1]?.id || '';
-    const tailSummary = String(combined[combined.length - 1]?.preview || combined[combined.length - 1]?.text || '').slice(0, 80);
-    const signature = `${location.pathname}|${combined.length}|${firstId}|${lastId}|${tailSummary}|${state.historyArchiveVersion}`;
-    if (state.timelineTurnsCache.signature === signature && Array.isArray(state.timelineTurnsCache.turns) && state.timelineTurnsCache.turns.length) {
-      return state.timelineTurnsCache.turns;
-    }
-
-    const turns = combined;
+    const firstId = turns[0]?.id || '';
+    const lastId = turns[turns.length - 1]?.id || '';
+    const tailSummary = String(turns[turns.length - 1]?.preview || '').slice(0, 80);
+    const signature = `${location.pathname}|live-only|${turns.length}|${firstId}|${lastId}|${tailSummary}`;
     state.timelineTurnsCache = { signature, turns };
     return turns;
   }
 
   function collectHistoryCleanerTurnsFast() {
+    syncHistoryArchiveContext();
+    if (SITE_KEY === SITE_KEYS.chatgpt && state.historyArchiveRounds.length) {
+      return state.historyArchiveRounds
+        .map((round) => {
+          const node = getHistoryRoundAnchorNode(round);
+          if (!(node instanceof HTMLElement)) return null;
+          return {
+            id: round.markerId,
+            role: 'user',
+            node,
+          };
+        })
+        .filter(Boolean);
+    }
+
     const nodes = collectConversationTurnNodesFast();
     return nodes.map((node, index) => {
       const role = detectNodeRole(node);
@@ -1870,10 +1945,30 @@
       if (round?.placeholderEl instanceof HTMLElement && round.placeholderEl.isConnected) {
         round.placeholderEl.remove();
       }
+      if (round?.spacerEl instanceof HTMLElement && round.spacerEl.isConnected) {
+        round.spacerEl.remove();
+      }
     });
     state.historyArchiveRounds = [];
+    if (state.historyArchivePoolEl instanceof HTMLElement) {
+      state.historyArchivePoolEl.replaceChildren();
+    }
     state.historyArchiveVersion += 1;
     state.historyArchiveOpenMarkerId = '';
+    state.historyArchiveWindowMode = 'latest';
+    state.historyArchiveWindowStart = 0;
+    state.historyArchiveWindowEnd = -1;
+    state.historyArchiveIndexReady = false;
+    state.historyArchiveActiveMarkerId = '';
+    if (state.historyArchiveFocusTimer) {
+      clearTimeout(state.historyArchiveFocusTimer);
+      state.historyArchiveFocusTimer = null;
+    }
+    if (state.historyArchiveSyncTimer) {
+      clearTimeout(state.historyArchiveSyncTimer);
+      state.historyArchiveSyncTimer = null;
+    }
+    state.timelineTurnsCache = { signature: '', turns: [] };
   }
 
   function estimateElementOuterHeight(element) {
@@ -1885,215 +1980,567 @@
     return Math.max(0, rect.height + marginTop + marginBottom);
   }
 
-  function snapshotTurnForArchive(turn) {
-    if (!turn?.node || !(turn.node instanceof HTMLElement)) return null;
-    const role = turn.role === 'user' ? 'user' : 'assistant';
-    const contentNode = resolveContentNode(turn.node, role) || turn.node;
-    const visualClone = contentNode.cloneNode(true);
-    staticizeDynamicContent(contentNode, visualClone);
-    replaceButtonsWithSpans(visualClone);
-    visualClone.querySelectorAll('.sr-only, script, style').forEach((el) => el.remove());
-    const preview = getTimelineSummaryText(contentNode) || `${formatRole(role)} 内容`;
+  function cloneTurnForHistoryRound(turn) {
     return {
-      id: turn.id,
-      role,
-      preview,
-      html: visualClone.outerHTML || `<div>${escapeHtml(contentNode.textContent || '')}</div>`,
+      ...turn,
+      images: Array.isArray(turn.images) ? turn.images.map((item) => ({ ...item })) : [],
+      attachments: Array.isArray(turn.attachments) ? turn.attachments.map((item) => ({ ...item })) : [],
+      formulas: Array.isArray(turn.formulas) ? [...turn.formulas] : [],
     };
   }
 
-  function buildArchivedRoundChunks(removableTurns) {
-    const chunks = [];
-    let currentChunk = null;
+  function ensureHistoryArchivePool() {
+    if (!(state.historyArchivePoolEl instanceof HTMLElement)) {
+      const pool = document.createElement('div');
+      pool.className = 'ced-history-archive-pool';
+      pool.hidden = true;
+      state.historyArchivePoolEl = pool;
+    }
+    return state.historyArchivePoolEl;
+  }
 
-    const pushCurrentChunk = () => {
-      if (!currentChunk || !currentChunk.turns.length || !(currentChunk.placeholderAnchor instanceof HTMLElement)) return;
-      chunks.push(currentChunk);
-      currentChunk = null;
+  function groupTurnsIntoHistoryRounds(turns = []) {
+    const groups = [];
+    let current = [];
+    turns.forEach((turn) => {
+      if (!turn) return;
+      const role = turn.role === 'user' ? 'user' : 'assistant';
+      if (!current.length || role === 'user') {
+        if (current.length) {
+          groups.push(current);
+        }
+        current = [turn];
+        return;
+      }
+      current.push(turn);
+    });
+    if (current.length) {
+      groups.push(current);
+    }
+    return groups;
+  }
+
+  function buildHistoryRoundSummary(group = [], index = 0) {
+    const preferred = group.find((turn) => turn.role === 'user') || group[0];
+    return preferred?.preview || preferred?.text || `第 ${index + 1} 轮`;
+  }
+
+  function buildHistoryRoundMarkerId(group = [], index = 0, existingRound = null) {
+    if (existingRound?.markerId) return existingRound.markerId;
+    const preferred = group.find((turn) => turn.role === 'user') || group[0];
+    return preferred?.id || `ced-round-${index}`;
+  }
+
+  function measureHistoryRoundHeight(round) {
+    if (!round) return 0;
+    const liveNodes = Array.isArray(round.domNodes)
+      ? round.domNodes.filter((node) => node instanceof HTMLElement && node.isConnected)
+      : [];
+    if (!liveNodes.length) {
+      return Math.max(0, Number(round.measuredHeight) || 0);
+    }
+    const height = liveNodes.reduce((sum, node) => sum + estimateElementOuterHeight(node), 0);
+    return Math.max(0, height || 0);
+  }
+
+  function createHistoryRoundRecord(group = [], index = 0, existingRound = null) {
+    const markerId = buildHistoryRoundMarkerId(group, index, existingRound);
+    const turns = group.map((turn) => {
+      const cloned = cloneTurnForHistoryRound(turn);
+      cloned.roundId = markerId;
+      cloned.roundIndex = index;
+      if (cloned.node instanceof HTMLElement) {
+        cloned.node.dataset.cedRoundMarkerId = markerId;
+      }
+      return cloned;
+    });
+    const domNodes = turns
+      .map((turn) => turn.node)
+      .filter((node) => node instanceof HTMLElement);
+
+    const round = {
+      markerId,
+      roundIndex: index,
+      role: group.some((turn) => turn.role === 'user') ? 'user' : (group[0]?.role || 'assistant'),
+      summary: buildHistoryRoundSummary(group, index),
+      turns,
+      domNodes,
+      spacerEl: existingRound?.spacerEl || null,
+      live: domNodes.some((node) => node.isConnected),
+      wasArchived: existingRound?.wasArchived === true,
+      measuredHeight: 0,
+      restoring: false,
     };
+    round.measuredHeight = measureHistoryRoundHeight(round) || Math.max(0, Number(existingRound?.measuredHeight) || 0);
+    return round;
+  }
 
-    removableTurns.forEach((turn, index) => {
-      if (!turn?.node || !(turn.node instanceof HTMLElement)) return;
-      const startsNewChunk = !currentChunk || turn.role === 'user';
-      if (startsNewChunk) {
-        pushCurrentChunk();
-        currentChunk = {
-          markerId: turn.id || `archived-${index}`,
-          role: turn.role === 'user' ? 'user' : 'assistant',
-          summary: turn.preview || turn.text || `第 ${index + 1} 轮`,
-          turns: [],
-          collapsedHeight: 0,
-          placeholderAnchor: turn.node,
-          placeholderEl: null,
-          restored: false,
-        };
+  function buildHistoryRoundsFromTurns(turns = [], existingRounds = []) {
+    return groupTurnsIntoHistoryRounds(turns)
+      .map((group, index) => createHistoryRoundRecord(group, index, existingRounds[index] || null));
+  }
+
+  function renumberHistoryRounds(startIndex = 0) {
+    const start = Math.max(0, Number(startIndex) || 0);
+    for (let index = start; index < state.historyArchiveRounds.length; index += 1) {
+      const round = state.historyArchiveRounds[index];
+      if (!round) continue;
+      round.roundIndex = index;
+      round.turns.forEach((turn) => {
+        turn.roundId = round.markerId;
+        turn.roundIndex = index;
+        if (turn.node instanceof HTMLElement) {
+          turn.node.dataset.cedRoundMarkerId = round.markerId;
+        }
+      });
+      if (round.spacerEl instanceof HTMLElement) {
+        round.spacerEl.dataset.markerId = round.markerId;
       }
+    }
+  }
 
-      const snapshot = snapshotTurnForArchive(turn);
-      if (snapshot) {
-        currentChunk.turns.push(snapshot);
-      }
-      currentChunk.collapsedHeight += estimateElementOuterHeight(turn.node);
+  function collectTurnsFromHistoryRounds() {
+    if (!state.historyArchiveRounds.length) return [];
+    return state.historyArchiveRounds.flatMap((round) => round.turns.map((turn) => ({
+      ...turn,
+      roundId: round.markerId,
+      roundIndex: round.roundIndex,
+      node: turn.node instanceof HTMLElement ? turn.node : getHistoryRoundAnchorNode(round),
+      archived: round.live !== true && round.wasArchived === true,
+      restored: round.live === true && round.wasArchived === true,
+      preview: turn.preview || round.summary || '',
+    })));
+  }
 
-      if (turn.role === 'user') {
-        currentChunk.markerId = turn.id || currentChunk.markerId;
-        currentChunk.role = 'user';
-        currentChunk.summary = turn.preview || turn.text || currentChunk.summary;
+  function getHistoryRoundAnchorNode(round) {
+    if (!round) return null;
+    const liveNode = Array.isArray(round.domNodes)
+      ? round.domNodes.find((node) => node instanceof HTMLElement && node.isConnected)
+      : null;
+    if (liveNode instanceof HTMLElement) {
+      round.live = true;
+      return liveNode;
+    }
+    if (round.spacerEl instanceof HTMLElement) {
+      round.live = false;
+      return round.spacerEl;
+    }
+    return null;
+  }
+
+  function findHistoryRoundById(markerId = '') {
+    if (!markerId) return null;
+    return state.historyArchiveRounds.find((round) => round?.markerId === markerId) || null;
+  }
+
+  function createHistoryRoundSpacer(round) {
+    const spacer = document.createElement('div');
+    spacer.className = 'ced-archive-placeholder ced-archive-placeholder--spacer';
+    spacer.dataset.markerId = round.markerId;
+    spacer.dataset.archived = '1';
+    spacer.setAttribute('aria-hidden', 'true');
+    round.spacerEl = spacer;
+    updateHistoryRoundSpacer(round);
+    return spacer;
+  }
+
+  function ensureHistoryRoundSpacer(round) {
+    if (!(round?.spacerEl instanceof HTMLElement)) {
+      return createHistoryRoundSpacer(round);
+    }
+    updateHistoryRoundSpacer(round);
+    return round.spacerEl;
+  }
+
+  function updateHistoryRoundSpacer(round) {
+    if (!round) return;
+    const spacer = ensureHistoryRoundSpacer(round);
+    const height = Math.max(24, Math.round(round.measuredHeight || 24));
+    spacer.dataset.markerId = round.markerId;
+    spacer.classList.toggle('is-live', round.live === true);
+    spacer.classList.toggle('is-restored', round.wasArchived === true && round.live === true);
+    spacer.classList.toggle('is-restoring', round.restoring === true);
+    spacer.style.height = round.live === true ? '0px' : `${height}px`;
+    spacer.style.minHeight = round.live === true ? '0px' : `${height}px`;
+  }
+
+  function archiveHistoryRound(round) {
+    if (!round || round.live !== true) return false;
+    const connectedNodes = round.domNodes.filter((node) => node instanceof HTMLElement && node.isConnected);
+    if (!connectedNodes.length) {
+      round.live = false;
+      round.wasArchived = true;
+      updateHistoryRoundSpacer(round);
+      return false;
+    }
+
+    round.measuredHeight = measureHistoryRoundHeight(round) || round.measuredHeight;
+    const spacer = ensureHistoryRoundSpacer(round);
+    connectedNodes[0].before(spacer);
+
+    const pool = ensureHistoryArchivePool();
+    const frag = document.createDocumentFragment();
+    round.domNodes.forEach((node) => {
+      if (node instanceof HTMLElement) {
+        frag.appendChild(node);
       }
     });
-
-    pushCurrentChunk();
-    return chunks.filter((chunk) => chunk.turns.length && chunk.placeholderAnchor instanceof HTMLElement);
-  }
-
-  function updateArchivePlaceholderUi(round) {
-    const placeholderEl = round?.placeholderEl;
-    if (!(placeholderEl instanceof HTMLElement)) return;
-    const button = placeholderEl.querySelector('.ced-archive-placeholder__toggle');
-    const summaryEl = placeholderEl.querySelector('.ced-archive-placeholder__summary');
-    const metaEl = placeholderEl.querySelector('.ced-archive-placeholder__meta');
-    const contentEl = placeholderEl.querySelector('.ced-archive-placeholder__content');
-    const restored = round.restored === true;
-    placeholderEl.classList.toggle('is-restored', restored);
-    if (contentEl instanceof HTMLElement) {
-      contentEl.hidden = !restored;
-    }
-    if (button instanceof HTMLButtonElement) {
-      button.dataset.markerId = round.markerId;
-      button.setAttribute('aria-expanded', restored ? 'true' : 'false');
-    }
-    if (summaryEl instanceof HTMLElement) {
-      summaryEl.textContent = round.summary || '已归档历史轮次';
-    }
-    if (metaEl instanceof HTMLElement) {
-      const turnCount = round.turns?.length || 0;
-      metaEl.textContent = restored
-        ? `已恢复 ${turnCount} 条消息 · 点击折叠`
-        : `已归档 ${turnCount} 条消息 · 点击恢复`;
-    }
-    if (!restored) {
-      placeholderEl.style.height = `${Math.max(52, Math.round(round.collapsedHeight || 52))}px`;
-    } else {
-      placeholderEl.style.height = 'auto';
-      placeholderEl.style.minHeight = `${Math.max(52, Math.round(round.collapsedHeight || 52))}px`;
-    }
-  }
-
-  function createHistoryArchivePlaceholder(round) {
-    const placeholder = document.createElement('section');
-    placeholder.className = 'ced-archive-placeholder';
-    placeholder.dataset.markerId = round.markerId;
-    placeholder.dataset.archived = '1';
-    placeholder.innerHTML = `
-      <button type="button" class="ced-archive-placeholder__toggle" data-marker-id="${escapeHtml(round.markerId)}" aria-expanded="false">
-        <span class="ced-archive-placeholder__summary"></span>
-        <span class="ced-archive-placeholder__meta"></span>
-      </button>
-      <div class="ced-archive-placeholder__content" hidden></div>
-    `;
-    round.placeholderEl = placeholder;
-    updateArchivePlaceholderUi(round);
-    return placeholder;
-  }
-
-  function renderArchivedRoundHtml(round) {
-    const turns = Array.isArray(round?.turns) ? round.turns : [];
-    return turns.map((turn) => {
-      const roleClass = turn.role === 'user' ? 'user' : 'assistant';
-      const roleLabel = turn.role === 'user' ? 'User' : 'Assistant';
-      return `
-        <article class="ced-archive-turn ced-archive-turn--${roleClass}">
-          <div class="ced-archive-turn__role">${roleLabel}</div>
-          <div class="ced-archive-turn__body">${turn.html || `<div>${escapeHtml(turn.preview || '')}</div>`}</div>
-        </article>
-      `;
-    }).join('');
-  }
-
-  function collapseArchivedRound(round) {
-    if (!round || !(round.placeholderEl instanceof HTMLElement)) return false;
-    const contentEl = round.placeholderEl.querySelector('.ced-archive-placeholder__content');
-    if (contentEl instanceof HTMLElement) {
-      contentEl.innerHTML = '';
-      contentEl.hidden = true;
-    }
-    round.restored = false;
-    if (state.historyArchiveOpenMarkerId === round.markerId) {
-      state.historyArchiveOpenMarkerId = '';
-    }
-    updateArchivePlaceholderUi(round);
-    state.historyArchiveVersion += 1;
-    scheduleTimelineRefresh();
+    pool.appendChild(frag);
+    round.live = false;
+    round.wasArchived = true;
+    round.restoring = false;
+    updateHistoryRoundSpacer(round);
     return true;
   }
 
-  function collapseOtherArchivedRounds(exceptMarkerId = '') {
-    state.historyArchiveRounds.forEach((round) => {
-      if (!round || round.markerId === exceptMarkerId || round.restored !== true) return;
-      collapseArchivedRound(round);
-    });
-  }
+  function restoreHistoryRound(round) {
+    if (!round) return false;
+    if (round.live === true) {
+      round.measuredHeight = measureHistoryRoundHeight(round) || round.measuredHeight;
+      updateHistoryRoundSpacer(round);
+      return false;
+    }
 
-  function restoreArchivedRound(markerId, options = {}) {
-    syncHistoryArchiveContext();
-    const round = state.historyArchiveRounds.find((item) => item.markerId === markerId);
-    if (!round || !(round.placeholderEl instanceof HTMLElement)) return null;
-
-    if (round.restored === true) {
-      if (options.allowCollapse === true) {
-        collapseArchivedRound(round);
-        return round.placeholderEl;
+    const spacer = ensureHistoryRoundSpacer(round);
+    if (!spacer.isConnected) {
+      const nextAnchor = state.historyArchiveRounds
+        .slice(round.roundIndex + 1)
+        .map((item) => getHistoryRoundAnchorNode(item))
+        .find((node) => node instanceof HTMLElement && node.isConnected);
+      if (nextAnchor instanceof HTMLElement) {
+        nextAnchor.before(spacer);
+      } else {
+        const container = resolveCollectionRoot()
+          || getConversationObserveTarget()
+          || document.querySelector('main');
+        container?.appendChild(spacer);
       }
-      return round.placeholderEl;
     }
-
-    collapseOtherArchivedRounds(markerId);
-    const contentEl = round.placeholderEl.querySelector('.ced-archive-placeholder__content');
-    if (contentEl instanceof HTMLElement && !contentEl.innerHTML) {
-      contentEl.innerHTML = renderArchivedRoundHtml(round);
-      contentEl.hidden = false;
-    }
-    round.restored = true;
-    state.historyArchiveOpenMarkerId = markerId;
-    updateArchivePlaceholderUi(round);
-    state.historyArchiveVersion += 1;
-    scheduleTimelineRefresh();
-    return round.placeholderEl;
-  }
-
-  function collectArchivedTimelineTurns() {
-    syncHistoryArchiveContext();
-    return state.historyArchiveRounds
-      .filter((round) => round?.placeholderEl instanceof HTMLElement && round.placeholderEl.isConnected)
-      .map((round) => ({
-        id: round.markerId,
-        role: round.role || 'user',
-        node: round.placeholderEl,
-        text: round.summary || '',
-        preview: round.summary || '',
-        archived: true,
-        restored: round.restored === true,
-        onActivate: () => restoreArchivedRound(round.markerId),
-      }));
-  }
-
-  function prepareHistoryArchiveBeforeTrim(payload = {}) {
-    syncHistoryArchiveContext();
-    const removableTurns = Array.isArray(payload.removableTurns) ? payload.removableTurns : [];
-    if (!removableTurns.length) return;
-
-    const chunks = buildArchivedRoundChunks(removableTurns);
-    if (!chunks.length) return;
-
-    chunks.forEach((chunk) => {
-      if (!(chunk.placeholderAnchor instanceof HTMLElement)) return;
-      if (state.historyArchiveRounds.some((item) => item.markerId === chunk.markerId)) return;
-      const placeholder = createHistoryArchivePlaceholder(chunk);
-      chunk.placeholderAnchor.before(placeholder);
-      state.historyArchiveRounds.push(chunk);
+    const frag = document.createDocumentFragment();
+    round.domNodes.forEach((node) => {
+      if (node instanceof HTMLElement) {
+        frag.appendChild(node);
+      }
     });
+    spacer.after(frag);
+    round.live = true;
+    round.wasArchived = true;
+    round.restoring = false;
+    round.measuredHeight = measureHistoryRoundHeight(round) || round.measuredHeight;
+    updateHistoryRoundSpacer(round);
+    return true;
+  }
 
+  function getConversationScrollContainer() {
+    return getConversationObserveTarget() || document.scrollingElement || document.documentElement;
+  }
+
+  function getRoundOffsetTop(round) {
+    const anchor = getHistoryRoundAnchorNode(round);
+    const container = getConversationScrollContainer();
+    if (!(anchor instanceof HTMLElement) || !(container instanceof HTMLElement)) return null;
+    const containerRect = container.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    return container.scrollTop + (anchorRect.top - containerRect.top);
+  }
+
+  function adjustConversationScrollBy(delta = 0) {
+    if (!Number.isFinite(delta) || Math.abs(delta) < 0.5) return;
+    const container = getConversationScrollContainer();
+    if (!(container instanceof HTMLElement)) return;
+    container.scrollTop += delta;
+  }
+
+  function syncHistoryRoundStore(domTurns = []) {
+    syncHistoryArchiveContext();
+    if (!Array.isArray(domTurns) || !domTurns.length) return;
+
+    if (!state.historyArchiveIndexReady || !state.historyArchiveRounds.length) {
+      state.historyArchiveRounds = buildHistoryRoundsFromTurns(domTurns);
+      renumberHistoryRounds(0);
+      state.historyArchiveIndexReady = state.historyArchiveRounds.length > 0;
+      state.historyArchiveWindowStart = 0;
+      state.historyArchiveWindowEnd = Math.max(-1, state.historyArchiveRounds.length - 1);
+      state.historyArchiveWindowMode = 'latest';
+      state.historyArchiveVersion += 1;
+      return;
+    }
+
+    const nextRounds = buildHistoryRoundsFromTurns(domTurns);
+    if (!nextRounds.length) return;
+
+    const replaceStart = Math.max(0, state.historyArchiveWindowStart || 0);
+    const replaceEnd = Math.max(replaceStart - 1, state.historyArchiveWindowEnd || -1);
+    const replaceCount = replaceEnd >= replaceStart ? (replaceEnd - replaceStart + 1) : 0;
+    const existingSlice = state.historyArchiveRounds.slice(replaceStart, replaceStart + replaceCount);
+    const adopted = buildHistoryRoundsFromTurns(
+      nextRounds.flatMap((round) => round.turns),
+      existingSlice
+    );
+
+    state.historyArchiveRounds.splice(replaceStart, replaceCount, ...adopted);
+    renumberHistoryRounds(replaceStart);
+    state.historyArchiveWindowStart = replaceStart;
+    state.historyArchiveWindowEnd = replaceStart + adopted.length - 1;
+    state.historyArchiveIndexReady = true;
     state.historyArchiveVersion += 1;
+  }
+
+  function applyHistoryWindowRange(startIndex, endIndex, options = {}) {
+    if (!state.historyArchiveRounds.length) {
+      return { archivedRounds: 0, restoredRounds: 0, liveRounds: 0 };
+    }
+
+    const lastIndex = state.historyArchiveRounds.length - 1;
+    const start = Math.max(0, Math.min(lastIndex, Number(startIndex) || 0));
+    const end = Math.max(start, Math.min(lastIndex, Number(endIndex) || start));
+    const anchorRound = findHistoryRoundById(options.anchorMarkerId || state.historyArchiveOpenMarkerId);
+    const beforeTop = anchorRound ? getRoundOffsetTop(anchorRound) : null;
+    let archivedRounds = 0;
+    let restoredRounds = 0;
+
+    muteConversationObserverFor(document.hidden ? 420 : 260);
+    state.historyArchiveApplyingWindow = true;
+    try {
+      state.historyArchiveRounds.forEach((round, index) => {
+        const shouldLive = index >= start && index <= end;
+        if (shouldLive) {
+          if (restoreHistoryRound(round)) restoredRounds += 1;
+          return;
+        }
+        if (archiveHistoryRound(round)) archivedRounds += 1;
+      });
+    } finally {
+      state.historyArchiveApplyingWindow = false;
+    }
+
+    state.historyArchiveWindowStart = start;
+    state.historyArchiveWindowEnd = end;
+    state.historyArchiveWindowMode = options.mode || 'latest';
+    state.historyArchiveOpenMarkerId = options.focusMarkerId || '';
+    state.historyArchiveVersion += 1;
+    state.timelineTurnsCache = { signature: '', turns: [] };
+
+    const afterTop = anchorRound ? getRoundOffsetTop(anchorRound) : null;
+    if (beforeTop !== null && afterTop !== null) {
+      adjustConversationScrollBy(afterTop - beforeTop);
+    }
+
+    return {
+      archivedRounds,
+      restoredRounds,
+      liveRounds: Math.max(0, end - start + 1),
+    };
+  }
+
+  function applyLatestHistoryWindow(options = {}) {
+    const keepRounds = normalizeHistoryCleanerKeepRounds(
+      options.keepRounds ?? state.historyCleanerKeepRounds
+    );
+    if (!state.historyArchiveRounds.length) {
+      return { archivedRounds: 0, restoredRounds: 0, liveRounds: 0 };
+    }
+    const lastIndex = state.historyArchiveRounds.length - 1;
+    const startIndex = Math.max(0, state.historyArchiveRounds.length - keepRounds);
+    return applyHistoryWindowRange(startIndex, lastIndex, {
+      mode: 'latest',
+      focusMarkerId: '',
+      anchorMarkerId: options.anchorMarkerId || '',
+    });
+  }
+
+  function focusHistoryRound(markerId, options = {}) {
+    syncHistoryArchiveContext();
+    const round = findHistoryRoundById(markerId);
+    if (!round) {
+      if (markerId) {
+        requestHistoryFocusReload(markerId);
+      }
+      return null;
+    }
+
+    const radius = Math.max(1, HISTORY_FOCUS_RADIUS);
+    const startIndex = Math.max(0, round.roundIndex - radius);
+    const endIndex = Math.min(state.historyArchiveRounds.length - 1, round.roundIndex + radius);
+    applyHistoryWindowRange(startIndex, endIndex, {
+      mode: 'focus',
+      focusMarkerId: markerId,
+      anchorMarkerId: markerId,
+    });
+    state.historyArchiveActiveMarkerId = markerId;
+    return getHistoryRoundAnchorNode(findHistoryRoundById(markerId) || round);
+  }
+
+  function scheduleHistoryRoundFocus(markerId, delay = 90) {
+    if (!markerId) return;
+    if (state.historyArchiveFocusTimer) {
+      clearTimeout(state.historyArchiveFocusTimer);
+    }
+    state.historyArchiveFocusTimer = setTimeout(() => {
+      state.historyArchiveFocusTimer = null;
+      focusHistoryRound(markerId, { source: 'timeline-active' });
+      scheduleTimelineRefresh();
+    }, Math.max(40, delay));
+  }
+
+  function releaseHistoryFocusWindow() {
+    if (!state.historyArchiveRounds.length) return;
+    if (state.historyArchiveWindowMode !== 'focus') return;
+    applyLatestHistoryWindow({
+      keepRounds: state.historyCleanerKeepRounds,
+      anchorMarkerId: state.historyArchiveActiveMarkerId || state.historyArchiveOpenMarkerId || '',
+    });
+    state.historyArchiveActiveMarkerId = '';
+  }
+
+  function captureHistoryWindowState() {
+    return {
+      mode: state.historyArchiveWindowMode,
+      start: state.historyArchiveWindowStart,
+      end: state.historyArchiveWindowEnd,
+      focusMarkerId: state.historyArchiveOpenMarkerId,
+      activeMarkerId: state.historyArchiveActiveMarkerId,
+    };
+  }
+
+  function restoreHistoryWindowState(snapshot) {
+    if (!snapshot || !state.historyArchiveRounds.length) return;
+    if (snapshot.mode === 'focus' && snapshot.focusMarkerId) {
+      focusHistoryRound(snapshot.focusMarkerId, { source: 'restore-window-snapshot' });
+      return;
+    }
+    applyHistoryWindowRange(
+      snapshot.start ?? 0,
+      snapshot.end ?? Math.max(0, state.historyArchiveRounds.length - 1),
+      {
+        mode: snapshot.mode || 'latest',
+        focusMarkerId: snapshot.mode === 'focus' ? snapshot.focusMarkerId || '' : '',
+        anchorMarkerId: snapshot.activeMarkerId || snapshot.focusMarkerId || '',
+      }
+    );
+  }
+
+  function expandAllHistoryRoundsForRender() {
+    if (!state.historyArchiveRounds.length) return;
+    applyHistoryWindowRange(0, Math.max(0, state.historyArchiveRounds.length - 1), {
+      mode: 'render',
+      focusMarkerId: '',
+      anchorMarkerId: state.historyArchiveActiveMarkerId || state.historyArchiveOpenMarkerId || '',
+    });
+  }
+
+  function restoreArchivedRound(markerId, _options = {}) {
+    return focusHistoryRound(markerId, { source: 'manual-restore' });
+  }
+
+  function handleTimelineActiveMarkerChange(marker = {}) {
+    if (SITE_KEY !== SITE_KEYS.chatgpt || !state.historyArchiveRounds.length) return;
+    const markerId = marker?.id || '';
+    if (!markerId) return;
+    state.historyArchiveActiveMarkerId = markerId;
+
+    if (marker.archived === true) {
+      if (markerId !== state.historyArchiveOpenMarkerId) {
+        scheduleHistoryRoundFocus(markerId, document.hidden ? 240 : 90);
+      }
+      return;
+    }
+
+    const round = findHistoryRoundById(markerId);
+    if (!round) return;
+    const latestStart = Math.max(0, state.historyArchiveRounds.length - normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds));
+    if (state.historyArchiveWindowMode === 'focus' && round.roundIndex >= latestStart) {
+      if (state.historyArchiveFocusTimer) {
+        clearTimeout(state.historyArchiveFocusTimer);
+        state.historyArchiveFocusTimer = null;
+      }
+      releaseHistoryFocusWindow();
+      scheduleTimelineRefresh();
+    }
+  }
+
+  function applyHistoryArchiveTrim(payload = {}) {
+    syncHistoryArchiveContext();
+    if (!state.historyArchiveRounds.length) {
+      return {
+        ok: false,
+        message: '未找到可归档的对话轮次',
+        rounds: 0,
+        messages: 0,
+        removedMessages: 0,
+        removedRounds: 0,
+        autoMaintain: payload.autoMaintain === true,
+      };
+    }
+
+    const keepRounds = normalizeHistoryCleanerKeepRounds(payload.keepRounds ?? state.historyCleanerKeepRounds);
+    const totalRounds = state.historyArchiveRounds.length;
+    const totalMessages = collectTurnsFromHistoryRounds().length;
+    const liveBefore = state.historyArchiveRounds.filter((round) => round.live === true).length;
+    const result = applyLatestHistoryWindow({
+      keepRounds,
+      anchorMarkerId: state.historyArchiveOpenMarkerId || '',
+    });
+    const liveAfter = state.historyArchiveRounds.filter((round) => round.live === true).length;
+
+    return {
+      ok: true,
+      message: `已归档旧对话，当前保留 ${liveAfter} 轮 live 内容`,
+      rounds: totalRounds,
+      messages: totalMessages,
+      removedMessages: Math.max(0, payload.removableTurns?.length || 0),
+      removedRounds: Math.max(0, liveBefore - liveAfter),
+      autoMaintain: payload.autoMaintain === true,
+      archivedRounds: result.archivedRounds,
+      restoredRounds: result.restoredRounds,
+      liveRounds: liveAfter,
+    };
+  }
+
+  function maybeRestorePendingHistoryFocus() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    try {
+      const raw = sessionStorage.getItem(HISTORY_FOCUS_RELOAD_KEY);
+      if (!raw) return;
+      sessionStorage.removeItem(HISTORY_FOCUS_RELOAD_KEY);
+      const payload = JSON.parse(raw);
+      if (!payload || payload.conversationKey !== getHistoryArchiveConversationKey()) return;
+      const anchor = focusHistoryRound(payload.markerId, { source: 'reload-restore' });
+      if (anchor instanceof HTMLElement) {
+        anchor.scrollIntoView({ block: 'center', behavior: 'auto' });
+        scheduleTimelineRefresh();
+      }
+    } catch (_error) {
+      // ignore session restore failure
+    }
+  }
+
+  function requestHistoryFocusReload(markerId = '') {
+    if (!markerId) return;
+    try {
+      sessionStorage.setItem(HISTORY_FOCUS_RELOAD_KEY, JSON.stringify({
+        conversationKey: getHistoryArchiveConversationKey(),
+        markerId,
+      }));
+    } catch (_error) {
+      // ignore storage failure
+    }
+    location.reload();
+  }
+
+  function scheduleHistoryArchiveSync(delay = 180) {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (state.historyArchiveSyncTimer) {
+      clearTimeout(state.historyArchiveSyncTimer);
+    }
+    state.historyArchiveSyncTimer = setTimeout(() => {
+      state.historyArchiveSyncTimer = null;
+      if (state.heavyRefreshTimer) {
+        clearTimeout(state.heavyRefreshTimer);
+        state.heavyRefreshTimer = null;
+      }
+      refreshConversationData();
+    }, Math.max(80, delay));
   }
 
   function getTimelineSummaryText(node) {
@@ -2325,7 +2772,7 @@
       keepRounds: state.historyCleanerKeepRounds,
       getTurns: collectHistoryCleanerTurnsFast,
       getObserveTarget: getConversationObserveTarget,
-      beforeTrim: prepareHistoryArchiveBeforeTrim,
+      applyTrim: applyHistoryArchiveTrim,
       onTrim: handleHistoryCleanerTrim,
     });
   }
@@ -2353,6 +2800,18 @@
   function getHistoryCleanerStats() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) {
       return { ok: false, message: '当前站点暂不支持 History Cleaner', rounds: 0, messages: 0 };
+    }
+    if (state.historyArchiveRounds.length) {
+      const rounds = state.historyArchiveRounds.length;
+      const messages = collectTurnsFromHistoryRounds().length;
+      return {
+        ok: true,
+        message: `当前会话共 ${rounds} 轮，${messages} 条消息；live 窗口保留 ${state.historyArchiveRounds.filter((round) => round.live === true).length} 轮`,
+        rounds,
+        messages,
+        keepRounds: state.historyCleanerKeepRounds,
+        autoMaintain: state.historyCleanerAutoMaintain,
+      };
     }
     return window.__cedHistoryCleaner?.getStats?.()
       || { ok: false, message: 'History Cleaner 未初始化', rounds: 0, messages: 0 };
@@ -2935,6 +3394,9 @@
         state.observerImpactFlags.meta = false;
 
         if (conversationChanged) {
+          if (SITE_KEY === SITE_KEYS.chatgpt) {
+            scheduleHistoryArchiveSync(document.hidden ? 320 : 140);
+          }
           state.timelineTurnsCache.signature = '';
           scheduleTimelineEnsure(280);
           scheduleTimelineRefresh();
@@ -3204,12 +3666,21 @@
 
     state.exporting = true;
     showToast('正在处理...', 10000);
+    let historyWindowSnapshot = null;
+    let expandedHistoryForRender = false;
 
     try {
       // 渲染导出需要先懒加载；Claude还需展开折叠代码/文件块。
       const needsRender = ['pdf', 'screenshot', 'word', 'html'].includes(state.selectedFormat);
       const shouldExpandClaude = SITE_KEY === SITE_KEYS.claude;
+      historyWindowSnapshot = SITE_KEY === SITE_KEYS.chatgpt && state.historyArchiveRounds.length
+        ? captureHistoryWindowState()
+        : null;
       if (needsRender || shouldExpandClaude) {
+        if (needsRender && historyWindowSnapshot) {
+          expandAllHistoryRoundsForRender();
+          expandedHistoryForRender = true;
+        }
         const wasAllSelected = state.turns.length > 0
           && state.selectedTurnIds.size === state.turns.length;
         if (needsRender) {
@@ -3250,6 +3721,10 @@
       console.error(err);
       showToast('导出失败: ' + (err.message || String(err)));
     } finally {
+      if (expandedHistoryForRender && historyWindowSnapshot) {
+        restoreHistoryWindowState(historyWindowSnapshot);
+        await refreshConversationData();
+      }
       state.exporting = false;
       showToast('导出流程结束');
     }
@@ -3992,7 +4467,7 @@ ${snapshotRoot.outerHTML}
         const hostScrollHeight = Math.ceil(host.scrollHeight || 0);
         const estimatedByTurns = Math.max(360, visualTurns.length * 140);
         renderHeightPx = Math.max(renderHeightPx, hostHeight, hostScrollHeight, estimatedByTurns);
-        console.warn('[ChronoChat Studio] Conversation height too small, using fallback render height:', renderHeightPx);
+        console.warn('[ThreadAtlas] Conversation height too small, using fallback render height:', renderHeightPx);
       }
       const renderTarget = options?.target || 'default';
       const estimatedPixels = width * Math.max(renderHeightPx, 1);
@@ -4021,13 +4496,13 @@ ${snapshotRoot.outerHTML}
             try {
               stripUnsupportedColorFunctions(clonedDoc);
             } catch (error) {
-              console.warn('[ChronoChat Studio] stripUnsupportedColorFunctions failed', error);
+              console.warn('[ThreadAtlas] stripUnsupportedColorFunctions failed', error);
             }
           },
           ignoreElements: (element) => element.classList.contains('ced-ignore')
         });
       } catch (html2canvasError) {
-        console.warn('[ChronoChat Studio] html2canvas failed, trying foreignObject fallback:', html2canvasError.message);
+        console.warn('[ThreadAtlas] html2canvas failed, trying foreignObject fallback:', html2canvasError.message);
         canvas = await renderWithForeignObject(snapshotNode, width, renderHeightPx, scale, bgColor);
       }
 
@@ -4666,7 +5141,7 @@ ${snapshotRoot.outerHTML}
         if (style) img.setAttribute('style', style);
         dst.replaceWith(img);
       } catch (error) {
-        console.warn('[ChronoChat Studio] Canvas snapshot failed', error);
+        console.warn('[ThreadAtlas] Canvas snapshot failed', error);
       }
     }
   }
@@ -4685,7 +5160,7 @@ ${snapshotRoot.outerHTML}
             style.removeProperty(name);
           }
         } catch (error) {
-          console.warn('[ChronoChat Studio] Failed to inspect style property', error);
+          console.warn('[ThreadAtlas] Failed to inspect style property', error);
         }
       }
     };

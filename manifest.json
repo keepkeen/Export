@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "ChronoChat Studio (ChatGPT + Gemini + Claude + Grok)",
-  "description": "Timeline-first workspace and export extension for ChatGPT, Gemini, Claude, and Grok. Export to text, markdown, Word, JSON, Excel, CSV, PDF, screenshot and more.",
+  "name": "ThreadAtlas",
+  "description": "Thread-first workspace, navigation, and export toolkit for ChatGPT, Gemini, Claude, and Grok.",
   "version": "0.1.0",
   "permissions": [
     "storage",
@@ -60,7 +60,9 @@
         "src/history-cleaner-feature.js",
         "src/content-script.js"
       ],
-      "css": ["src/styles.css"],
+      "css": [
+        "src/styles.css"
+      ],
       "run_at": "document_idle"
     }
   ],
@@ -88,7 +90,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "ChronoChat Studio (ChatGPT + Gemini + Claude + Grok)",
+    "default_title": "ThreadAtlas",
     "default_popup": "src/popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
@@ -96,13 +98,14 @@
       "48": "icons/icon-48.png"
     }
   },
+  "options_page": "src/options.html",
   "commands": {
     "toggle_chatgpt_exporter": {
       "suggested_key": {
         "default": "Ctrl+Shift+Y",
         "mac": "Command+Shift+Y"
       },
-      "description": "Toggle the ChronoChat Studio panel"
+      "description": "Toggle ThreadAtlas panel"
     }
   }
 }
