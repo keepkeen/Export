@@ -59,20 +59,24 @@
 
       style.textContent = `
         .ced-folder-list,
-        .ced-folder-conversation-list {
+        .ced-folder-conversation-list,
+        .ced-folder-sidebar__groups {
           gap: ${spacing}px !important;
         }
 
-        .ced-folder-group__list {
+        .ced-folder-group__list,
+        .ced-folder-sidebar-group__list {
           gap: ${spacing}px !important;
         }
 
-        .ced-folder-item {
+        .ced-folder-item,
+        .ced-folder-sidebar-group {
           padding-top: ${vPad}px !important;
           padding-bottom: ${vPad}px !important;
         }
 
-        .ced-folder-conversation {
+        .ced-folder-conversation,
+        .ced-folder-sidebar-conversation {
           padding-top: ${vPad}px !important;
           padding-bottom: ${vPad}px !important;
         }

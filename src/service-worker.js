@@ -10,6 +10,11 @@ const CHAT_URL_PATTERNS = [
 const MENU_TOGGLE = 'ced-menu-toggle';
 const MENU_EXPORT = 'ced-menu-export';
 const CHUNK_STORE = new Map();
+const CONTEXT_SYNC_DEFAULT_PORT = 3030;
+const STORAGE_KEYS = {
+  contextSyncEnabled: 'ced-context-sync-enabled',
+  contextSyncPort: 'ced-context-sync-port'
+};
 
 chrome.runtime.onInstalled.addListener(async () => {
   await rebuildContextMenus();
@@ -57,8 +62,107 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     );
     return true;
   }
+  if (message.type === 'CED_CONTEXT_SYNC_CHECK') {
+    checkContextSyncServer(message).then(
+      (result) => sendResponse(result),
+      (error) => sendResponse({ ok: false, error: error?.message || String(error) })
+    );
+    return true;
+  }
+  if (message.type === 'CED_CONTEXT_SYNC_PUSH') {
+    pushContextSyncPayload(message).then(
+      (result) => sendResponse(result),
+      (error) => sendResponse({ ok: false, error: error?.message || String(error) })
+    );
+    return true;
+  }
   return false;
 });
+
+function normalizeContextSyncPort(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return CONTEXT_SYNC_DEFAULT_PORT;
+  return Math.max(1, Math.min(65535, Math.round(numeric)));
+}
+
+async function readContextSyncSettings() {
+  const fallback = {
+    [STORAGE_KEYS.contextSyncEnabled]: false,
+    [STORAGE_KEYS.contextSyncPort]: CONTEXT_SYNC_DEFAULT_PORT
+  };
+  if (!chrome?.storage?.sync?.get) return fallback;
+
+  return new Promise((resolve) => {
+    chrome.storage.sync.get(fallback, (items) => {
+      resolve({
+        [STORAGE_KEYS.contextSyncEnabled]: items?.[STORAGE_KEYS.contextSyncEnabled] === true,
+        [STORAGE_KEYS.contextSyncPort]: normalizeContextSyncPort(items?.[STORAGE_KEYS.contextSyncPort])
+      });
+    });
+  });
+}
+
+async function resolveContextSyncTarget(message) {
+  const settings = await readContextSyncSettings();
+  const enabled = settings[STORAGE_KEYS.contextSyncEnabled] === true;
+  const port = normalizeContextSyncPort(message?.port ?? settings[STORAGE_KEYS.contextSyncPort]);
+  const url = `http://127.0.0.1:${port}/sync`;
+  return { enabled, port, url };
+}
+
+async function checkContextSyncServer(message) {
+  const { enabled, url } = await resolveContextSyncTarget(message);
+  if (!enabled) {
+    return { ok: false, error: 'context sync disabled' };
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 500);
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      cache: 'no-store'
+    });
+    return { ok: response.ok };
+  } catch (_error) {
+    return { ok: false };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function pushContextSyncPayload(message) {
+  const { enabled, url } = await resolveContextSyncTarget(message);
+  if (!enabled) {
+    return { ok: false, error: 'context sync disabled' };
+  }
+  const payload = Array.isArray(message?.payload) ? message.payload : [];
+  if (!payload.length) {
+    return { ok: false, error: 'empty payload' };
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    mode: 'cors',
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    return { ok: false, error: `HTTP ${response.status}` };
+  }
+
+  let data = null;
+  try {
+    data = await response.json();
+  } catch (_error) {
+    data = null;
+  }
+  return { ok: true, count: payload.length, data };
+}
 
 async function fetchAsDataURL(url) {
   if (!url || /^data:/i.test(url)) {

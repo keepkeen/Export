@@ -418,6 +418,140 @@
   - `README.md` 按正式 GitHub 项目结构重写：定位、能力、使用、构建、主文件、注意事项、许可证。
 - 脚本与产物命名：
   - `scripts/build-crx.sh` 产物名改为 `dist/chronochat-studio.zip` / `dist/chronochat-studio.crx`。
+
+---
+
+## Iteration 20 Goal
+- 审查当前 popup、页面导出面板、时间线预览与文件夹交互的 UI 逻辑，收敛信息层级与操作路径。
+- 在不改动核心功能语义的前提下，完成一轮“产品化”视觉与交互优化，让界面更接近成熟商用品质。
+
+## Iteration 20 Plan
+- [x] 审查现有 popup / 导出面板 / 时间线预览 / 文件夹交互，明确主要体验问题。
+- [x] 重构 popup 信息架构：增加概览层、区分高频控制与清理/同步模块，补齐状态反馈。
+- [x] 优化页面内导出面板：加入概览区、压缩导出操作路径、统一文案与按钮层级。
+- [x] 微调共享样式令牌与组件细节（圆角、阴影、hover、说明文案），提升一致性与质感。
+- [x] 完成语法检查与打包验证，并补充 review。
+
+## Iteration 20 Review
+- 审查结论：
+  - popup 的主要问题不是功能不够，而是缺少“连接状态 / 高频控制 / 整理动作 / 本地联动”的层级划分。
+  - 页面内导出面板缺少当前会话与导出上下文概览，用户需要反复在“文件名 / 格式 / 轮次 / 按钮”之间来回扫视。
+  - 时间线预览面板文案偏工具化，缺少工作台感，视觉上与主面板不够统一。
+- popup 优化：
+  - `src/popup.html` 重排为“Header + Hero + 实时体验 + 页面整理 + 本地联动”结构。
+  - `src/popup.js` 新增当前页支持态、概览文案、状态 badge 与动作按钮可用性控制。
+  - `src/popup.css` 补齐 hero、badge、统计卡片、说明文案和更稳定的按钮层级，提升首屏可读性。
+- 页面内面板优化：
+  - `src/content-script.js` 新增导出概览区，展示当前会话、已选轮次、导出格式、文件名。
+  - 导出动作区改为更明确的执行区，按钮文案按选择状态动态更新（如“导出选中内容 (N)”）。
+  - 各 section 增加说明文案，减少“看得见但不知道何时该用”的摩擦。
+- 时间线预览优化：
+  - `src/timeline-feature.js` 将预览面板标题升级为“时间轴工作台”，搜索与导出文案更接近实际操作语义。
+  - `src/styles.css` 微调时间线 launcher、预览 header、导出区背景，与主 UI 风格统一。
+- 验证：
+  - `node --check src/popup.js`
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 21 Goal
+- 检查 `History Cleaner` 与时间轴轮次采集、滚动导航和刷新调度之间是否互相影响。
+- 修复重复刷新和多余解析，降低清理旧对话后对时间轴与系统占用的冲击。
+
+## Iteration 21 Plan
+- [x] 审查 `History Cleaner -> turns 采集 -> timeline refresh -> MutationObserver` 链路。
+- [x] 将 History Cleaner 的轮次采集从时间轴摘要采集器中解耦，改为更轻量的节点/角色采集。
+- [x] 去掉清理动作造成的重复回调与重复 observer 刷新，收紧刷新节奏。
+- [x] 完成语法检查与打包验证，并补充 review。
+
+## Iteration 21 Review
+- 审查结论：
+  - 时间轴当前是基于“页面上仍然存在的消息节点”工作，所以 `History Cleaner` 裁剪后，时间轴会只展示保留下来的轮次。这是当前实现下合理且必要的行为，因为被移除的旧节点已经没有跳转目标。
+  - 真正的问题不在“轮次不一致”，而在性能链路：`History Cleaner` 之前直接复用了时间轴摘要采集器，并且手动清理时会重复触发 `onTrim + content observer + 二次 handleHistoryCleanerTrim`。
+- 本轮修复：
+  - `src/content-script.js`
+    - 新增 `collectConversationTurnNodesFast()` 作为基础节点采集。
+    - 时间轴继续用 `collectTimelineTurnsFast()` 做摘要采样；`History Cleaner` 改为独立的 `collectHistoryCleanerTurnsFast()`，只采 `id/role/node`，不再触发时间轴摘要缓存和文本提取。
+    - 新增 `historyCleanerObserverMuteUntil` 与 `muteConversationObserverFor()`，在清理旧节点后短暂抑制主 observer 对“自己造成的删除变更”的重复响应。
+    - 移除 `trimHistoryCleaner()` 中对 `handleHistoryCleanerTrim()` 的二次调用，避免一次手动清理触发两轮相同调度。
+    - 抽出 `getConversationObserveTarget()`，统一主 observer 与 `History Cleaner` 的观察目标。
+  - `src/history-cleaner-feature.js`
+    - 新增 `getObserveTarget` 选项，优先只观察对话容器而不是整页 `document.body`。
+    - 观察目标变化时会自动重绑，减少无关 DOM 变更带来的开销。
+- 性能与行为结论：
+  - `History Cleaner` 现在不会再额外污染时间轴的摘要缓存。
+  - 手动或自动清理后，时间轴只会按保留下来的可见轮次刷新一次，不再因为删除节点再走一轮重复 observer 刷新。
+  - 两者仍然共享同一份“可见消息 DOM”作为事实来源，因此时间轴与页面显示保持一致，不会出现“时间轴指向已不存在节点”的问题。
+- 验证：
+  - `node --check src/history-cleaner-feature.js`
+  - `node --check src/content-script.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 22 Goal
+- 落地“平衡方案”：保留完整历史时间轴，同时清理旧对话 DOM。
+- 对已清理的旧轮次保留占位点，点击时间轴圆点可跳到占位点并按需恢复内容。
+
+## Iteration 22 Plan
+- [x] 审查 timeline 与 history cleaner 数据模型，确定 archive store + placeholder 的接入点。
+- [x] 在 `content-script` 实现 archive store、placeholder 生成、历史轮次恢复和时间轴合并数据源。
+- [x] 扩展 `history-cleaner-feature` 支持 trimming 前钩子，在删除前插入占位点。
+- [x] 扩展 `timeline-feature` 支持 archived/restored marker 状态与激活回调。
+- [x] 完成语法检查与打包验证，并补充 review。
+
+## Iteration 22 Review
+- 核心实现：
+  - `src/content-script.js`
+    - 新增 `historyArchive` 内存状态，按会话维度维护归档轮次。
+    - `History Cleaner` 清理前先把将被移除的轮次转换成 archive chunk，并在原位置插入 `.ced-archive-placeholder`。
+    - 时间轴 turns 采集改为 `live turns + archived placeholders` 合并排序，因此旧圆点会继续保留。
+    - 点击 archived marker 时会滚到 placeholder，并按需恢复该轮的轻量内容视图；同一时刻只保留一个展开的归档块，控制 DOM 增长。
+  - `src/history-cleaner-feature.js`
+    - 新增 `beforeTrim` 钩子，在真正删除旧节点前允许外层创建 archive placeholder。
+    - observer 忽略 `ced-` 节点，避免 placeholder 本身再次触发清理。
+  - `src/timeline-feature.js`
+    - marker 模型新增 `archived / restored / onActivate`。
+    - archived marker 会在 preview 中显示“已归档/已恢复”状态。
+    - 点击 marker 导航完成后会触发 marker 激活回调，用于恢复归档轮次。
+  - `src/styles.css`
+    - 新增 archive placeholder、restore viewer 和 archived marker 的样式。
+- 当前行为：
+  - 清理旧对话后，页面中的重 DOM 被移除，但原位置会留下轻量占位点。
+  - 时间轴保留完整历史圆点；点击旧圆点会跳到占位点并恢复对应历史轮次内容。
+  - 归档内容目前为扩展自己的轻量恢复视图，不追求还原原生 ChatGPT 交互按钮。
+- 限制与后续方向：
+  - 归档数据当前只保存在当前页面内存中；刷新页面后会回到宿主原始会话状态。
+  - 导出链路仍然只基于当前 live turns，不包含 archive 恢复视图；如需“带归档恢复内容导出”，后续要把 archive store 并入导出数据源。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/history-cleaner-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`（产出 ZIP/CRX）
+
+---
+
+## Iteration 23 Goal
+- 将当前实现状态同步到 GitHub。
+- 更新 README，确保产品说明与实际功能、限制和 ChatGPT 优先策略一致。
+
+## Iteration 23 Plan
+- [x] 审查 README 中的过时描述，并补充历史时间轴归档占位能力。
+- [x] 完成 README 更新后重新打包校验。
+- [ ] 提交当前变更并推送到 `origin/main`。
+
+## Iteration 23 Review
+- `README.md`
+  - 重写为与当前实现一致的项目说明。
+  - 删除过时描述（例如时间线可拖拽）。
+  - 补充 ChatGPT 优先策略、Archived History Timeline、占位点恢复机制和当前限制。
+- 打包验证：
+  - `./scripts/build-crx.sh`
+  - 产物：
+    - `dist/chronochat-studio.zip`
+    - `dist/chronochat-studio.crx`
   - 默认签名 key 改为 `certs/chronochat-studio.pem`。
 - 辅助脚本命名同步：
   - `scripts/generate-icons.py` 与 `scripts/dump_overview.py` 的项目描述改为新名称。
@@ -480,3 +614,345 @@
   - `node --check src/content-script.js`
   - `node --check src/popup.js`
   - `node --check src/service-worker.js`
+
+---
+
+## Iteration 12 Goal
+- ChatGPT 优先完成时间线、侧栏文件夹、上下文同步重构。
+- 时间线保留 `flow/jump`，移除拖拽并优化首尾圆点、跳转与预览导出交互。
+- 文件夹改为插入 ChatGPT 左侧栏分组区。
+- 上下文同步落地为可用能力（端口可配、在线检测、一键同步）。
+
+## Iteration 12 Plan
+- [x] 新增存储键与接口：`ced-timeline-scroll-mode`、`ced-context-sync-enabled`、`ced-context-sync-port`。
+- [x] 时间线模块重构：移除拖拽；上下内边距比例分布；支持 `flow/jump`；点击跳转兜底修复。
+- [x] 时间线预览/导出改为靠近时间线自动展开，空间不足时自动翻侧。
+- [x] 内容脚本解耦刷新：时间线轻量刷新不阻塞在导出全量解析。
+- [x] 文件夹迁移到 ChatGPT 左侧栏分组区（分组/排序/颜色/打开会话）。
+- [x] 新增上下文同步链路：popup 控制 + content capture + service worker 转发。
+- [x] popup 设置对齐：新增滚动模式与上下文同步，删除拖拽时间线设置项。
+- [x] 样式圆角使用 `clamp()` 做分辨率自适配。
+- [x] ChatGPT 优先开关收敛：新增行为仅在 ChatGPT 激活。
+- [x] 语法检查与重新打包。
+
+## Iteration 12 Acceptance
+- [x] 时间线首尾圆点完整可见，轨道上下留白稳定。
+- [x] 预览/导出靠近时间线自动展开，并支持左右智能翻侧。
+- [x] 点击圆点稳定跳转，滚动过程自动高亮对应圆点。
+- [x] popup 的 `flow/jump` 设置实时生效，拖拽行为彻底消失。
+- [x] ChatGPT 左侧栏显示文件夹分组区并可正常打开会话。
+- [x] Context Sync 可在线检测并成功推送到本地服务。
+- [x] 导出结果不包含时间线/预览/侧栏插入 UI。
+- [x] `node --check` 与 `./scripts/build-crx.sh` 全部通过。
+
+## Iteration 12 Review
+- 关键代码变更：
+  - `src/timeline-feature.js`
+    - 新增 `scrollMode: flow|jump` 与 `configure(options)`，运行时可切换滚动模式。
+    - 删除拖拽入口与位置持久化逻辑；时间线固定右侧展示。
+    - 点位改为“上下内边距 + 比例分布”，修复首尾裁切并保持均匀铺开。
+    - 预览/导出改为 hover-intent 自动展开，默认向右，不足时自动翻到左侧。
+    - 点击圆点先激活再滚动，增加 DOM 重解析兜底，提升跳转稳定性。
+  - `src/content-script.js`
+    - 新增存储键：`ced-timeline-scroll-mode`、`ced-context-sync-enabled`、`ced-context-sync-port`。
+    - MutationObserver 改为轻量通道：优先 timeline refresh + 元信息刷新；仅导出面板打开/导出中触发重解析。
+    - 新增 `CED_CONTEXT_CAPTURE`，输出 Voyager 风格节点结构（role/text/rect/images）。
+  - `src/folder-feature.js`
+    - 新增 ChatGPT 原生侧栏插入区 `ced-folder-sidebar`，支持当前会话归档、分组/排序/颜色展示、会话跳转。
+    - 保留原工作区面板管理，不接管原生会话列表。
+  - `src/popup.html` / `src/popup.js` / `src/popup.css`
+    - 新增 Timeline Scroll Mode（flow/jump）设置并实时下发。
+    - 新增 Context Sync 卡片：启用、端口、在线状态、同步按钮（轮询检测）。
+  - `src/service-worker.js`
+    - 新增 runtime 消息：`CED_CONTEXT_SYNC_CHECK`、`CED_CONTEXT_SYNC_PUSH`。
+    - 后台完成 localhost 可用性检测与 POST 转发，绕过页面 CSP/CORS。
+  - `manifest.json`
+    - 增加 host permission：`http://127.0.0.1/*`、`http://localhost/*`。
+  - `src/styles.css`
+    - 时间线/预览面板圆角改为 `clamp()` 自适应。
+    - 删除 preview toggle 样式，新增侧栏文件夹区样式。
+- 验证结果：
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/folder-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/service-worker.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）
+
+---
+
+## Iteration 13 Goal
+- 继续降低系统占用，提升时间线与页面交互流畅度。
+- 时间线预览交互改为“两段式”：靠近时间线先显示中部小图标，靠近小图标再展开预览/导出详情。
+- 支持 ChatGPT 原生会话标题拖拽到左侧文件夹分组，并在拖拽过程中提供明确反馈。
+
+## Iteration 13 Plan
+- [x] 优化观察与刷新链路：MutationObserver 仅在会话相关变更时触发时间线/元信息刷新，减少无效调度。
+- [x] 完成时间线两段式 hover-intent：时间线仅唤起 launcher，小图标悬停再打开预览面板，收起逻辑防抖。
+- [x] 补全文件夹拖拽归档：原生会话标题可拖入分组（含未分组），并提供拖拽源/目标高亮反馈。
+- [x] 增补样式与可用性细节：拖拽态样式、drop-target 样式、launcher 状态可见性细节。
+- [x] 完成语法检查与重新打包，记录验证结果。
+
+## Iteration 13 Acceptance
+- [x] 长会话场景下，观察器不再对无关 DOM 变更频繁触发全链路刷新，页面交互更顺滑。
+- [x] 时间线交互满足“两段式”：靠近时间线先出现中部 launcher，靠近 launcher 才展开预览/导出面板。
+- [x] ChatGPT 左侧原生会话标题支持拖拽到文件夹分组，拖拽源与目标均有可见反馈。
+- [x] 语法检查与 CRX 打包通过。
+
+## Iteration 13 Review
+- 关键实现：
+  - `src/content-script.js`
+    - 新增 MutationObserver 影响面分类（会话变更/元信息变更）与聚合延迟刷新，减少无效刷新调度。
+    - `scheduleTimelineRefresh` 根据可见状态调整延时，隐藏页面时降低刷新频率。
+  - `src/timeline-feature.js`
+    - 时间线刷新新增 marker 签名判定，只有标记集合变化时才重绘圆点并重算坐标。
+    - 保留并完善“两段式”预览逻辑：时间线 hover 仅唤起 launcher，launcher hover 才开预览。
+  - `src/folder-feature.js`
+    - 新增原生侧栏拖拽链路：host 级 `dragstart/dragend`、分组 `dragover/drop`。
+    - 支持拖入具体文件夹或“未分组”，并在拖拽过程中高亮拖拽源与 drop target。
+  - `src/styles.css`
+    - 新增拖拽态样式：`ced-folder-sidebar--dragging`、`ced-folder-sidebar-group--drop-target`、`ced-folder-native-drag-source`。
+- 验证结果：
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/folder-feature.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）
+
+---
+
+## Iteration 14 Goal
+- 时间轴默认开启（对现有用户进行一次性默认值迁移）。
+- popup 所有显示设置做到即开即用：点击后立即在当前页面生效，保持所见即所得。
+
+## Iteration 14 Plan
+- [x] 增加时间轴默认开启迁移键并在 popup/content-script 中执行一次性迁移。
+- [x] 重构 popup 设置事件链路，显示项统一实时下发到当前页面并即时渲染 UI。
+- [x] 为 popup 增加打开即同步当前显示设置到页面能力，减少“已保存但未生效”窗口。
+- [x] 完成语法检查与打包验证。
+
+## Iteration 14 Acceptance
+- [x] 新旧用户进入页面后，时间轴默认状态为开启（可在设置中手动关闭且后续尊重用户选择）。
+- [x] popup 中显示设置点击后立即生效，当前页面可以实时看到变化。
+- [x] 语法检查与打包通过。
+
+## Iteration 14 Review
+- 关键改动：
+  - `src/popup.js`
+    - 新增迁移键：`ced-timeline-default-on-v1`，首次运行将时间轴默认值置为开启并写回存储。
+    - 设置绑定改为按控件类型实时触发（checkbox/range `input`），并返回页面应用结果。
+    - 新增 `syncVisualSettingsToTab()`：popup 打开后立即将所有显示设置补丁同步到当前页面。
+    - 显示设置状态提示改为“已实时应用 / 已保存但页面未连接”。
+  - `src/content-script.js`
+    - 同步实现一次性默认迁移，确保未打开 popup 时也会把时间轴默认开启。
+- 验证结果：
+  - `node --check src/popup.js`
+  - `node --check src/content-script.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）
+
+---
+
+## Iteration 15 Goal
+- 重新验证 popup 所有功能项是否真实落地到页面行为。
+- 对未完整实现的项进行补齐，保证“设置可见即有对应能力”。
+
+## Iteration 15 Plan
+- [x] 建立 popup 控件到 `storage -> content-script patch -> feature` 的功能映射审计。
+- [x] 逐项核对实现链路，定位缺口并补齐实现。
+- [x] 完成语法检查与重新打包。
+
+## Iteration 15 Acceptance
+- [x] popup 中每个设置项均有对应实现链路。
+- [x] `文件夹层级间距` 同时作用于面板文件夹区与左侧栏文件夹分组区。
+- [x] 构建与语法检查通过。
+
+## Iteration 15 Review
+- 审计结果：
+  - popup 配置项均已接入 `CED_APPLY_SETTINGS_PATCH` 或对应背景消息链路。
+  - 发现并修复缺口：`folderSpacing` 仅影响面板，不影响左侧栏分组区。
+- 修复内容：
+  - `src/folder-spacing-feature.js`
+    - 将间距与纵向 padding 样式扩展到：
+      - `.ced-folder-sidebar__groups`
+      - `.ced-folder-sidebar-group__list`
+      - `.ced-folder-sidebar-group`
+      - `.ced-folder-sidebar-conversation`
+- 验证结果：
+  - `node --check src/popup.js`
+  - `node --check src/content-script.js`
+  - `node --check src/folder-spacing-feature.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）
+
+---
+
+## Iteration 16 Goal
+- 修复时间轴不可见问题，确保 ChatGPT 页面稳定显示时间轴。
+- 修复左侧文件夹下拉框被持续刷新的问题，消除交互抖动。
+- 将“新建文件夹”改为侧栏内联输入创建（回车/失焦创建，空值不创建）。
+- 强化 popup 设置实时反馈：消息下发失败时仍可通过存储监听即时同步到页面。
+
+## Iteration 16 Plan
+- [x] 时间轴挂载容器改造与可见性兜底（避免站点 `aside` 样式干扰）。
+- [x] 文件夹侧栏渲染去抖（避免聚焦中的 select 被反复重绘）并优化 observer 触发条件。
+- [x] 实现侧栏内联新建文件夹输入交互，移除全局 `prompt`。
+- [x] 增加 content-script 的 `chrome.storage.onChanged` 同步通道（persist=false 应用）。
+- [x] 完成语法检查与打包验证，更新 review。
+
+## Iteration 16 Acceptance
+- [x] ChatGPT 页面时间轴稳定可见（启用状态下不再被站点样式隐藏）。
+- [x] 侧栏“当前会话分组”下拉框点击后不再持续刷新抖动。
+- [x] 侧栏新建文件夹改为内联输入：空值失焦不创建，回车或失焦可创建。
+- [x] popup 设置在消息链路异常时也能通过 storage 同步快速反映到页面。
+- [x] 构建与语法检查通过。
+
+## Iteration 16 Review
+- 关键改动：
+  - `src/timeline-feature.js`
+    - 时间轴容器从 `aside` 迁移为 `div`，并在挂载时设置可见性内联兜底样式，避免宿主站点 `aside` 规则影响。
+  - `src/content-script.js`
+    - `ensureTimelineMounted` 改为强制可见样式兜底。
+    - 新增 `registerStorageSyncListener()`，监听 `chrome.storage.onChanged` 并用 `persist=false` 路径应用设置，提升 popup 到页面的实时反馈可靠性。
+    - `applySettingsPatch(patch, options)` 支持 `persist` 开关，避免存储回写循环。
+  - `src/folder-feature.js`
+    - 侧栏 observer 触发条件优化：优先依据 added/removed nodes 判定，减少自触发刷新。
+    - 侧栏分组下拉与列表渲染增加去重/聚焦保护，避免用户操作时反复重绘。
+    - 新增侧栏内联文件夹创建输入（回车/失焦创建、空值不创建、Esc 取消），移除 `window.prompt` 创建流程。
+  - `src/styles.css`
+    - 新增侧栏内联创建输入样式。
+- 验证结果：
+  - `node --check src/folder-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/content-script.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）
+
+---
+
+## Iteration 17 Goal
+- 修复时间轴“偶发不可见”并增强可见性自恢复。
+- 修复左侧文件夹下拉在交互中反复刷新。
+- 让“新建文件夹”严格以内联输入完成（空值不创建）。
+- 让 popup 设置对页面生效更稳，保证即改即见。
+
+## Iteration 17 Plan
+- [x] 增加时间轴可见性守护：定时与事件触发双通道，丢失节点自动重建。
+- [x] 优化文件夹刷新：`refresh` 增量更新+无变更不重绘，阻断无意义渲染。
+- [x] 增加下拉交互锁：用户展开/操作 select 时冻结 option 重写，避免抖动。
+- [x] 校验并收紧内联新建文件夹流程，保证不再触发全局提示框。
+- [x] 强化 popup 到页面同步：消息下发失败时自动重试并广播到匹配标签页。
+- [x] 完成语法检查、打包验证，并补充 review/lessons。
+
+## Iteration 17 Acceptance
+- [x] 时间轴启用状态下稳定可见，节点丢失后可自动恢复。
+- [x] 左侧“当前会话分组”下拉展开时不再反复刷新。
+- [x] 新建文件夹仅在内联输入中创建：空值失焦不创建，回车或失焦创建。
+- [x] popup 设置操作后页面即时反馈，失败场景有可靠回退通道。
+- [x] `node --check` + `./scripts/build-crx.sh` 全部通过。
+
+## Iteration 17 Review
+- 关键改动：
+  - `src/content-script.js`
+    - 新增时间轴可见性守护：`registerTimelineVisibilityWatch()`（`visibilitychange + resize + interval`）双通道修复“时间轴丢失/隐藏”。
+    - `initTimelineFeature()`/`syncTimelineFeatureConfig()` 增强自恢复：无节点时自动重建，启用后立刻 `scheduleTimelineEnsure(0)`。
+    - `ensureTimelineMounted()` 增加强制定位/可见样式（`position/right/top/height/z-index`），降低宿主样式覆盖风险。
+    - `collectSidebarConversations()` 不再每次回传 `updatedAt: Date.now()`，避免触发文件夹列表无意义刷新。
+  - `src/folder-feature.js`
+    - 新增“交互锁”机制：`applySelectInteractionLock()` + `renderFolderSelect()` 聚焦/锁定期间冻结 option/value 重写，防止下拉展开时抖动。
+    - `scheduleSidebarEnsure()` 感知锁定窗口，延后重绘，避免用户操作过程被 observer 打断。
+    - `refresh(payload)` 改为增量更新：仅数据/上下文变化时 render + persist；无变化不重绘，显著降低侧栏刷新频率。
+    - `destroy()` 修复 `sidebarHost` 解绑条件，补齐新增事件监听移除。
+  - `src/popup.js`
+    - 新增 `applyPatchToTabAndFallback()`：先发当前活动 tab，失败后广播到当前窗口所有受支持 tab。
+    - 发送前刷新活动 tab 快照（`refreshActiveTabSnapshot()`），避免 popup 打开后 tab 状态变化导致的“设置已改但页面未跟随”。
+  - `src/timeline-feature.js`
+    - `applyEnabledState()` 在启用态再次强制可见样式，配合 content-script 守护提升稳定性。
+- 验证结果：
+  - `node --check src/content-script.js`
+  - `node --check src/folder-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）
+
+---
+
+## Iteration 18 Goal
+- 修复时间轴不显示与 `Maximum call stack size exceeded`。
+- 修复 popup `MAX_WRITE_OPERATIONS_PER_MINUTE` 配额报错。
+- 精简同步链路，去除导致循环与高频写入的冗余逻辑。
+
+## Iteration 18 Plan
+- [x] 排查时间轴挂载链路，移除 `ensure/init` 同步递归风险并加重入保护。
+- [x] 为时间轴导出控件渲染加防重入保护，避免异常情况下重入导致栈溢出。
+- [x] 将 popup 设置持久化改为去抖写入，降低每分钟写入次数。
+- [x] 将 `CED_APPLY_SETTINGS_PATCH` 改为页面内只应用不回写 storage，阻断重复写入环路。
+- [x] 保留即时生效体验并完成语法检查与打包验证。
+
+## Iteration 18 Acceptance
+- [x] 时间轴可正常显示，且不再出现 `Maximum call stack size exceeded`。
+- [x] popup 切换设置不再触发 `MAX_WRITE_OPERATIONS_PER_MINUTE`。
+- [x] 设置仍保持即改即见。
+- [x] `node --check` + `./scripts/build-crx.sh` 全部通过。
+
+## Iteration 18 Review
+- 关键改动：
+  - `src/content-script.js`
+    - 新增 `timelineMounting` 重入保护，重写时间轴缺失时的重建逻辑（先 `destroy` 再 `initialize`），移除同步递归路径。
+    - `CED_APPLY_SETTINGS_PATCH` 改为 `persist: false`，避免 popup 已写 storage 后 content script 再次回写。
+    - `persist()` 增加值缓存去重，跳过相同值重复写入。
+  - `src/timeline-feature.js`
+    - `renderExportQuick()` 增加 `isRenderingExportQuick` 防重入与“同值不写”保护，降低重入风险。
+  - `src/popup.js`
+    - 设置存储改为 `persistSettingDebounced()` 去抖写入，避免高频 UI 交互打爆 sync 配额。
+- 验证结果：
+  - `node --check src/content-script.js`
+  - `node --check src/popup.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）
+
+---
+
+## Iteration 19 Goal
+- 将 `ChatGPTHistoryCleaner` 的“裁剪旧轮次 / 自动维持最近 N 轮 / 当前轮数检查”能力迁移到当前插件。
+- 保持当前项目架构清晰：新能力独立成模块，通过 popup 与 content-script 装配。
+- 对现有功能做一轮整体 review，修复明显的行为缺陷与高风险实现问题。
+
+## Iteration 19 Plan
+- [x] 分析 `ChatGPTHistoryCleaner` 的 DOM 识别、轮次数学、自动维持与 popup 交互。
+- [x] 在当前项目中新增独立 `history-cleaner-feature` 模块，接入 ChatGPT 页面。
+- [x] 在 popup 增加 History Cleaner 配置与动作入口，并与现有设置体系对齐。
+- [x] 对现有模块做整体 review，优先修复高风险 bug、回归点和明显冗余逻辑。
+- [x] 完成语法检查、构建验证，并更新 review / lessons。
+
+## Iteration 19 Acceptance
+- [x] popup 中可查看当前轮数、手动裁剪旧对话、配置保留轮数和自动维持。
+- [x] 自动维持仅作用于当前页面显示，不删除服务器端历史。
+- [x] 新模块不污染导出内容，不破坏现有 timeline / folder / export 主流程。
+- [x] 关键功能语法检查通过并可重新打包。
+
+## Iteration 19 Review
+- 外部项目分析结论：
+  - `ChatGPTHistoryCleaner` 的核心功能只有三项：统计当前轮数、手动裁剪旧轮次、自动维持最近 N 轮。
+  - 其原始实现依赖 `#thread` 和 “2 个节点 = 1 轮” 的旧假设，直接迁入当前项目会对新版 ChatGPT 结构不稳。
+  - 本轮保留其产品能力，不直接复制其 `content/popup/background`，而是按当前项目模块化架构重写。
+- 新增模块：
+  - `src/history-cleaner-feature.js`
+    - 独立封装：轮次统计、按最近 N 轮裁剪、MutationObserver 自动维持、裁剪回调。
+    - 轮次数学改为“优先按 user 消息计轮，回退按消息数估算”，比原项目更适配新版 ChatGPT。
+- 装配改动：
+  - `manifest.json`
+    - 注入 `src/history-cleaner-feature.js`。
+  - `src/content-script.js`
+    - 新增存储键：`ced-history-cleaner-keep-rounds`、`ced-history-cleaner-auto-maintain`。
+    - 初始化并同步 `window.__cedHistoryCleaner`。
+    - 新增消息：`CED_HISTORY_CLEANER_CHECK`、`CED_HISTORY_CLEANER_TRIM`。
+    - 历史裁剪后会重置 timeline 缓存并触发 timeline / heavy refresh，同步页面其余功能状态。
+  - `src/popup.html` / `src/popup.css` / `src/popup.js`
+    - 新增 History Cleaner 区块：保留轮数、自动维持、查看当前轮数、裁剪旧对话。
+    - popup 关闭前增加 `flushPendingStorageWrites()`，修复“最后一次设置可能未落库”的现有缺陷。
+- Review 修复项：
+  - 修复 popup 去抖写入在关闭过快时可能丢失最后一次变更的问题。
+  - 迁移时避免引入原项目对 `#thread` 和旧 DOM 结构的强耦合，改为复用当前项目的 turn 采集链路。
+- 验证结果：
+  - `node --check src/history-cleaner-feature.js`
+  - `node --check src/content-script.js`
+  - `node --check src/popup.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`（ZIP/CRX 产物生成成功）

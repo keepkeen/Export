@@ -26,7 +26,9 @@
     "https://*.oaistatic.com/*",
     "https://*.googleusercontent.com/*",
     "https://*.gstatic.com/*",
-    "https://*.googleapis.com/*"
+    "https://*.googleapis.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
   ],
   "background": {
     "service_worker": "src/service-worker.js",
@@ -55,6 +57,7 @@
         "src/folder-spacing-feature.js",
         "src/markdown-patcher-feature.js",
         "src/snow-effect-feature.js",
+        "src/history-cleaner-feature.js",
         "src/content-script.js"
       ],
       "css": ["src/styles.css"],

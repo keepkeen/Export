@@ -88,8 +88,17 @@
       this.loaded = false;
       this.loadPromise = null;
       this.persistTimer = null;
+      this.sidebarObserver = null;
+      this.sidebarEnsureTimer = null;
+      this.sidebarHost = null;
+      this.draggingConversation = null;
+      this.dragOverFolderId = null;
+      this.dragSourceAnchor = null;
+      this.sidebarCreateInputVisible = false;
+      this.sidebarInteractionLockUntil = 0;
       this.currentConversationId = '';
       this.currentConversationTitle = '';
+      this.hasRendered = false;
       this.options = {
         onCurrentFolderChange: null,
       };
@@ -104,6 +113,14 @@
         sortSelect: null,
         folderList: null,
         conversationList: null,
+        sidebarSection: null,
+        sidebarCurrentTitle: null,
+        sidebarCurrentSelect: null,
+        sidebarSortSelect: null,
+        sidebarConversationList: null,
+        sidebarCreateButton: null,
+        sidebarCreateInline: null,
+        sidebarCreateInput: null,
       };
 
       this.handleCreateFolder = this.handleCreateFolder.bind(this);
@@ -111,11 +128,25 @@
       this.handleCurrentFolderChange = this.handleCurrentFolderChange.bind(this);
       this.handleFolderListClick = this.handleFolderListClick.bind(this);
       this.handleConversationListClick = this.handleConversationListClick.bind(this);
+      this.handleSidebarCurrentFolderChange = this.handleSidebarCurrentFolderChange.bind(this);
+      this.handleSidebarSortChange = this.handleSidebarSortChange.bind(this);
+      this.handleSidebarClick = this.handleSidebarClick.bind(this);
+      this.handleNativeDragStart = this.handleNativeDragStart.bind(this);
+      this.handleNativeDragEnd = this.handleNativeDragEnd.bind(this);
+      this.handleSidebarDragOver = this.handleSidebarDragOver.bind(this);
+      this.handleSidebarDragLeave = this.handleSidebarDragLeave.bind(this);
+      this.handleSidebarDrop = this.handleSidebarDrop.bind(this);
+      this.handleSidebarCreateInputBlur = this.handleSidebarCreateInputBlur.bind(this);
+      this.handleSidebarCreateInputKeydown = this.handleSidebarCreateInputKeydown.bind(this);
+      this.handleSelectInteractionStart = this.handleSelectInteractionStart.bind(this);
+      this.handleSelectInteractionEnd = this.handleSelectInteractionEnd.bind(this);
     }
 
     async initialize(options = {}) {
       this.options = { ...this.options, ...options };
       await this.loadData();
+      this.startSidebarObserver();
+      this.ensureSidebarSection();
       this.render();
       this.notifyCurrentFolderChange();
     }
@@ -251,9 +282,464 @@
       this.ui.currentSelect?.addEventListener('change', this.handleCurrentFolderChange);
       this.ui.folderList?.addEventListener('click', this.handleFolderListClick);
       this.ui.conversationList?.addEventListener('click', this.handleConversationListClick);
+      this.ui.section?.addEventListener('pointerdown', this.handleSelectInteractionStart, true);
+      this.ui.section?.addEventListener('keydown', this.handleSelectInteractionStart, true);
+      this.ui.section?.addEventListener('focusin', this.handleSelectInteractionStart, true);
+      this.ui.section?.addEventListener('focusout', this.handleSelectInteractionEnd, true);
 
       this.render();
       return section;
+    }
+
+    isVisibleElement(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      const rect = element.getBoundingClientRect();
+      if (!rect.width || !rect.height) return false;
+      const style = window.getComputedStyle(element);
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+    }
+
+    findSidebarHost() {
+      const conversationAnchors = Array.from(
+        document.querySelectorAll('a[href^="/c/"], a[href*="/c/"]')
+      ).filter((anchor) => anchor instanceof HTMLAnchorElement);
+
+      const sidebarAnchors = conversationAnchors
+        .filter((anchor) => this.isVisibleElement(anchor))
+        .filter((anchor) => !anchor.closest('.ced-folder-sidebar, .ced-panel, .ced-timeline-bar'))
+        .filter((anchor) => {
+          const rect = anchor.getBoundingClientRect();
+          return rect.left < Math.max(320, window.innerWidth * 0.45);
+        });
+
+      if (sidebarAnchors.length) {
+        const primaryAnchor = sidebarAnchors
+          .slice()
+          .sort((a, b) => {
+            const rectA = a.getBoundingClientRect();
+            const rectB = b.getBoundingClientRect();
+            return rectA.left - rectB.left || rectA.top - rectB.top;
+          })[0];
+        const fromAnchor = primaryAnchor.closest('nav, aside, [data-testid*="sidebar"], [class*="sidebar"]');
+        if (fromAnchor instanceof HTMLElement) {
+          return fromAnchor;
+        }
+      }
+
+      const selectors = [
+        'aside nav',
+        '[data-testid="history-sidebar"] nav',
+        'nav[aria-label*="Chat"]',
+        'aside',
+      ];
+      for (const selector of selectors) {
+        const found = document.querySelector(selector);
+        if (found instanceof HTMLElement) {
+          return found;
+        }
+      }
+      return null;
+    }
+
+    scheduleSidebarEnsure(delay = 120) {
+      if (this.sidebarEnsureTimer) {
+        clearTimeout(this.sidebarEnsureTimer);
+      }
+      const lockRemain = this.sidebarInteractionLockUntil - Date.now();
+      const effectiveDelay = lockRemain > 0 ? Math.max(delay, lockRemain + 60) : delay;
+      this.sidebarEnsureTimer = setTimeout(() => {
+        this.sidebarEnsureTimer = null;
+        this.ensureSidebarSection();
+        if (this.isSidebarInteractionLocked()) {
+          this.scheduleSidebarEnsure(180);
+          return;
+        }
+        this.renderSidebarCurrentConversation();
+        this.renderSidebarConversationGroups();
+      }, Math.max(40, effectiveDelay));
+    }
+
+    startSidebarObserver() {
+      if (this.sidebarObserver) return;
+      this.sidebarObserver = new MutationObserver((records) => {
+        if (!this.mutationMayAffectSidebar(records)) return;
+        this.scheduleSidebarEnsure(180);
+      });
+      this.sidebarObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    mutationMayAffectSidebar(records) {
+      if (!Array.isArray(records) || !records.length) return false;
+      for (const record of records) {
+        if (!record) continue;
+        const candidates = [];
+        record.addedNodes?.forEach((node) => {
+          if (node instanceof HTMLElement) candidates.push(node);
+        });
+        record.removedNodes?.forEach((node) => {
+          if (node instanceof HTMLElement) candidates.push(node);
+        });
+        if (!candidates.length && record.target instanceof HTMLElement) {
+          candidates.push(record.target);
+        }
+
+        for (const node of candidates) {
+          if (node.closest('.ced-folder-sidebar, .ced-panel, .ced-timeline-bar')) continue;
+          if (node.matches('aside, nav, [data-testid*="sidebar"], [class*="sidebar"], a[href*="/c/"]')) {
+            return true;
+          }
+          if (node.querySelector('a[href*="/c/"]')) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    enhanceNativeConversationDragTargets() {
+      const anchors = Array.from(document.querySelectorAll('a[href^="/c/"], a[href*="/c/"]'));
+      anchors.forEach((anchor) => {
+        if (!(anchor instanceof HTMLAnchorElement)) return;
+        if (anchor.closest('.ced-folder-sidebar, .ced-panel, .ced-timeline-bar')) return;
+        const rect = anchor.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        if (rect.left > Math.max(320, window.innerWidth * 0.45)) return;
+        anchor.draggable = true;
+        anchor.dataset.cedFolderDragSource = '1';
+      });
+    }
+
+    bindSidebarHost(host) {
+      if (this.sidebarHost === host) return;
+      if (this.sidebarHost) {
+        this.sidebarHost.removeEventListener('dragstart', this.handleNativeDragStart);
+        this.sidebarHost.removeEventListener('dragend', this.handleNativeDragEnd);
+      }
+      this.sidebarHost = host;
+      if (this.sidebarHost) {
+        this.sidebarHost.addEventListener('dragstart', this.handleNativeDragStart);
+        this.sidebarHost.addEventListener('dragend', this.handleNativeDragEnd);
+      }
+    }
+
+    findConversationAnchorFromDragEvent(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return null;
+      const direct = target.closest('a[href^="/c/"], a[href*="/c/"]');
+      if (direct instanceof HTMLAnchorElement) return direct;
+      const scoped = target.querySelector?.('a[href^="/c/"], a[href*="/c/"]');
+      return scoped instanceof HTMLAnchorElement ? scoped : null;
+    }
+
+    parseConversationFromAnchor(anchor) {
+      if (!(anchor instanceof HTMLAnchorElement)) return null;
+      const rawHref = anchor.getAttribute('href') || anchor.href || '';
+      const conversationId = normalizeText(extractConversationIdFromUrl(rawHref));
+      if (!conversationId) return null;
+      const url = new URL(rawHref, location.origin).href;
+      const title = normalizeText(anchor.textContent || anchor.getAttribute('aria-label') || conversationId) || conversationId;
+      return { conversationId, url, title };
+    }
+
+    resolveDropTargetFolderId(target) {
+      if (!(target instanceof HTMLElement)) return null;
+      const group = target.closest('[data-folder-id]');
+      if (group instanceof HTMLElement) {
+        return normalizeText(group.dataset.folderId || '');
+      }
+      return null;
+    }
+
+    applyDragOverFolder(folderId) {
+      this.dragOverFolderId = folderId;
+      if (!(this.ui.sidebarConversationList instanceof HTMLElement)) return;
+      this.ui.sidebarConversationList
+        .querySelectorAll('.ced-folder-sidebar-group')
+        .forEach((group) => {
+          if (!(group instanceof HTMLElement)) return;
+          const active = normalizeText(group.dataset.folderId || '') === folderId;
+          group.classList.toggle('ced-folder-sidebar-group--drop-target', active);
+        });
+    }
+
+    clearDragOverFolder() {
+      this.dragOverFolderId = null;
+      if (!(this.ui.sidebarConversationList instanceof HTMLElement)) return;
+      this.ui.sidebarConversationList
+        .querySelectorAll('.ced-folder-sidebar-group--drop-target')
+        .forEach((group) => group.classList.remove('ced-folder-sidebar-group--drop-target'));
+    }
+
+    clearDragSourceAnchor() {
+      if (this.dragSourceAnchor instanceof HTMLElement) {
+        this.dragSourceAnchor.classList.remove('ced-folder-native-drag-source');
+      }
+      this.dragSourceAnchor = null;
+    }
+
+    handleNativeDragStart(event) {
+      const anchor = this.findConversationAnchorFromDragEvent(event);
+      if (!anchor) return;
+      const parsed = this.parseConversationFromAnchor(anchor);
+      if (!parsed) return;
+      this.clearDragSourceAnchor();
+      this.dragSourceAnchor = anchor;
+      anchor.classList.add('ced-folder-native-drag-source');
+      this.draggingConversation = parsed;
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', parsed.url);
+      }
+      this.ui.sidebarSection?.classList.add('ced-folder-sidebar--dragging');
+    }
+
+    handleNativeDragEnd() {
+      this.draggingConversation = null;
+      this.clearDragOverFolder();
+      this.clearDragSourceAnchor();
+      this.ui.sidebarSection?.classList.remove('ced-folder-sidebar--dragging');
+    }
+
+    handleSidebarDragOver(event) {
+      if (!this.draggingConversation) return;
+      const folderId = this.resolveDropTargetFolderId(event.target);
+      if (folderId === null) return;
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'move';
+      }
+      this.applyDragOverFolder(folderId);
+    }
+
+    handleSidebarDragLeave(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const leavingGroup = target.closest('.ced-folder-sidebar-group');
+      if (!(leavingGroup instanceof HTMLElement)) return;
+      if (leavingGroup.contains(event.relatedTarget)) return;
+      if (this.dragOverFolderId === normalizeText(leavingGroup.dataset.folderId || '')) {
+        this.clearDragOverFolder();
+      }
+    }
+
+    handleSidebarDrop(event) {
+      if (!this.draggingConversation) return;
+      const folderId = this.resolveDropTargetFolderId(event.target);
+      if (folderId === null) return;
+      event.preventDefault();
+
+      const { conversationId, url, title } = this.draggingConversation;
+      this.data.conversations[conversationId] = {
+        id: conversationId,
+        title,
+        url,
+        updatedAt: Date.now(),
+      };
+
+      if (!folderId) {
+        delete this.data.conversationFolders[conversationId];
+      } else {
+        this.data.conversationFolders[conversationId] = folderId;
+      }
+
+      this.persistDataDebounced();
+      this.render();
+      this.notifyCurrentFolderChange();
+      this.handleNativeDragEnd();
+    }
+
+    buildFolderOptionsHtml() {
+      return [
+        '<option value="">未分组</option>',
+        ...this.data.folders.map((folder) => `<option value="${folder.id}">${escapeHtml(folder.name)}</option>`),
+      ].join('');
+    }
+
+    applySelectInteractionLock(select, duration = 1200) {
+      if (!(select instanceof HTMLSelectElement)) return;
+      const until = Date.now() + Math.max(160, duration);
+      select.dataset.cedLockUntil = String(until);
+      this.sidebarInteractionLockUntil = Math.max(this.sidebarInteractionLockUntil, until);
+    }
+
+    isSelectInteractionLocked(select) {
+      if (!(select instanceof HTMLSelectElement)) return false;
+      const until = Number(select.dataset.cedLockUntil || '0');
+      return Number.isFinite(until) && until > Date.now();
+    }
+
+    isSidebarInteractionLocked() {
+      return this.sidebarInteractionLockUntil > Date.now();
+    }
+
+    handleSelectInteractionStart(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const select = target.closest('select');
+      if (!(select instanceof HTMLSelectElement)) return;
+      const duration = event.type === 'focusin' ? 1300 : 1000;
+      this.applySelectInteractionLock(select, duration);
+    }
+
+    handleSelectInteractionEnd(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const select = target.closest('select');
+      if (!(select instanceof HTMLSelectElement)) return;
+      this.applySelectInteractionLock(select, 220);
+    }
+
+    renderFolderSelect(select, optionsHtml, selectedValue, disabled) {
+      if (!(select instanceof HTMLSelectElement)) return;
+      const isFocused = document.activeElement === select || select.matches(':focus');
+      const interactionLocked = this.isSelectInteractionLocked(select);
+      const previousOptions = select.dataset.cedOptionsHtml || '';
+      if (!(isFocused || interactionLocked) && previousOptions !== optionsHtml) {
+        select.innerHTML = optionsHtml;
+        select.dataset.cedOptionsHtml = optionsHtml;
+      }
+      if (!(isFocused || interactionLocked) && select.value !== selectedValue) {
+        select.value = selectedValue;
+      }
+      if (select.disabled !== !!disabled) {
+        select.disabled = !!disabled;
+      }
+    }
+
+    hideSidebarCreateInput({ clear = true } = {}) {
+      const wrap = this.ui.sidebarCreateInline;
+      const input = this.ui.sidebarCreateInput;
+      if (!(wrap instanceof HTMLElement) || !(input instanceof HTMLInputElement)) return;
+      this.sidebarCreateInputVisible = false;
+      wrap.hidden = true;
+      wrap.classList.remove('is-visible');
+      if (clear) {
+        input.value = '';
+      }
+    }
+
+    showSidebarCreateInput() {
+      const wrap = this.ui.sidebarCreateInline;
+      const input = this.ui.sidebarCreateInput;
+      if (!(wrap instanceof HTMLElement) || !(input instanceof HTMLInputElement)) return;
+      this.sidebarCreateInputVisible = true;
+      wrap.hidden = false;
+      wrap.classList.add('is-visible');
+      if (!input.value) {
+        input.value = '';
+      }
+      requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+      });
+    }
+
+    commitSidebarCreateInput() {
+      const input = this.ui.sidebarCreateInput;
+      if (!(input instanceof HTMLInputElement)) return;
+      const nextName = normalizeText(input.value);
+      if (!nextName) {
+        this.hideSidebarCreateInput({ clear: true });
+        return;
+      }
+      const exists = this.data.folders.some((folder) => normalizeText(folder.name).toLowerCase() === nextName.toLowerCase());
+      if (!exists) {
+        this.data.folders.push({
+          id: uid('folder'),
+          name: nextName,
+          color: '#41d1ff',
+          createdAt: Date.now(),
+        });
+        this.data.folders.sort((a, b) => a.createdAt - b.createdAt);
+        this.persistDataDebounced();
+        this.render();
+      }
+      this.hideSidebarCreateInput({ clear: true });
+    }
+
+    handleSidebarCreateInputBlur(event) {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement)) return;
+      this.commitSidebarCreateInput();
+    }
+
+    handleSidebarCreateInputKeydown(event) {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement)) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        this.commitSidebarCreateInput();
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.hideSidebarCreateInput({ clear: true });
+      }
+    }
+
+    ensureSidebarSection() {
+      const host = this.findSidebarHost();
+      if (!host) {
+        this.bindSidebarHost(null);
+        return;
+      }
+      this.bindSidebarHost(host);
+
+      if (this.ui.sidebarSection instanceof HTMLElement && this.ui.sidebarSection.isConnected) {
+        if (this.ui.sidebarSection.parentElement !== host) {
+          host.prepend(this.ui.sidebarSection);
+        }
+        this.enhanceNativeConversationDragTargets();
+        return;
+      }
+
+      const section = document.createElement('section');
+      section.className = 'ced-folder-sidebar';
+      section.innerHTML = `
+        <div class="ced-folder-sidebar__header">
+          <span>文件夹</span>
+          <button type="button" class="ced-folder-sidebar__create" data-action="create-folder" title="新建文件夹">+</button>
+        </div>
+        <div class="ced-folder-sidebar__create-inline" data-role="sidebar-create-inline" hidden>
+          <input class="ced-folder-sidebar__create-input" data-role="sidebar-create-input" placeholder="输入文件夹名后回车或点外部创建">
+        </div>
+        <div class="ced-folder-sidebar__current-title" data-role="sidebar-current-title">未识别到会话</div>
+        <select class="ced-folder-sidebar__select" data-role="sidebar-current-select"></select>
+        <div class="ced-folder-sidebar__sort">
+          <span>排序</span>
+          <select class="ced-folder-sidebar__sort-select" data-role="sidebar-sort-select">
+            <option value="updated-desc">最近更新</option>
+            <option value="title-asc">标题 A-Z</option>
+            <option value="title-desc">标题 Z-A</option>
+          </select>
+        </div>
+        <div class="ced-folder-sidebar__groups" data-role="sidebar-conversation-list"></div>
+      `;
+
+      host.prepend(section);
+      this.ui.sidebarSection = section;
+      this.ui.sidebarCurrentTitle = section.querySelector('[data-role="sidebar-current-title"]');
+      this.ui.sidebarCurrentSelect = section.querySelector('[data-role="sidebar-current-select"]');
+      this.ui.sidebarSortSelect = section.querySelector('[data-role="sidebar-sort-select"]');
+      this.ui.sidebarConversationList = section.querySelector('[data-role="sidebar-conversation-list"]');
+      this.ui.sidebarCreateButton = section.querySelector('[data-action="create-folder"]');
+      this.ui.sidebarCreateInline = section.querySelector('[data-role="sidebar-create-inline"]');
+      this.ui.sidebarCreateInput = section.querySelector('[data-role="sidebar-create-input"]');
+
+      this.ui.sidebarCurrentSelect?.addEventListener('change', this.handleSidebarCurrentFolderChange);
+      this.ui.sidebarSortSelect?.addEventListener('change', this.handleSidebarSortChange);
+      this.ui.sidebarSection?.addEventListener('click', this.handleSidebarClick);
+      this.ui.sidebarSection?.addEventListener('pointerdown', this.handleSelectInteractionStart, true);
+      this.ui.sidebarSection?.addEventListener('keydown', this.handleSelectInteractionStart, true);
+      this.ui.sidebarSection?.addEventListener('focusin', this.handleSelectInteractionStart, true);
+      this.ui.sidebarSection?.addEventListener('focusout', this.handleSelectInteractionEnd, true);
+      this.ui.sidebarConversationList?.addEventListener('dragover', this.handleSidebarDragOver);
+      this.ui.sidebarConversationList?.addEventListener('dragleave', this.handleSidebarDragLeave);
+      this.ui.sidebarConversationList?.addEventListener('drop', this.handleSidebarDrop);
+      this.ui.sidebarCreateInput?.addEventListener('blur', this.handleSidebarCreateInputBlur);
+      this.ui.sidebarCreateInput?.addEventListener('keydown', this.handleSidebarCreateInputKeydown);
+
+      this.enhanceNativeConversationDragTargets();
     }
 
     handleCreateFolder() {
@@ -290,6 +776,7 @@
       this.data.sortMode = value;
       this.persistDataDebounced();
       this.renderConversationGroups();
+      this.renderSidebarConversationGroups();
     }
 
     handleCurrentFolderChange(event) {
@@ -341,6 +828,39 @@
       window.location.href = url;
     }
 
+    handleSidebarCurrentFolderChange(event) {
+      const select = event.target;
+      if (!(select instanceof HTMLSelectElement)) return;
+      this.assignCurrentConversation(select.value || '');
+    }
+
+    handleSidebarSortChange(event) {
+      const select = event.target;
+      if (!(select instanceof HTMLSelectElement)) return;
+      const value = select.value;
+      if (!['updated-desc', 'title-asc', 'title-desc'].includes(value)) return;
+      this.data.sortMode = value;
+      this.persistDataDebounced();
+      this.renderConversationGroups();
+      this.renderSidebarConversationGroups();
+    }
+
+    handleSidebarClick(event) {
+      const button = event.target instanceof HTMLElement ? event.target.closest('button[data-action]') : null;
+      if (!(button instanceof HTMLButtonElement)) return;
+      const action = button.dataset.action || '';
+      if (action === 'open-conversation') {
+        const url = button.dataset.url || '';
+        if (url) {
+          window.location.href = url;
+        }
+        return;
+      }
+      if (action === 'create-folder') {
+        this.showSidebarCreateInput();
+      }
+    }
+
     assignCurrentConversation(folderId) {
       const conversationId = this.currentConversationId;
       if (!conversationId) return;
@@ -359,12 +879,23 @@
     }
 
     refresh(payload = {}) {
-      if (payload.currentConversationId) {
-        this.currentConversationId = normalizeText(payload.currentConversationId);
-      }
-      if (typeof payload.currentConversationTitle === 'string') {
-        this.currentConversationTitle = normalizeText(payload.currentConversationTitle);
-      }
+      this.ensureSidebarSection();
+      const previousConversationId = this.currentConversationId;
+      const hasConversationId = Object.prototype.hasOwnProperty.call(payload, 'currentConversationId');
+      const hasConversationTitle = Object.prototype.hasOwnProperty.call(payload, 'currentConversationTitle');
+      const nextConversationId = hasConversationId
+        ? normalizeText(payload.currentConversationId)
+        : this.currentConversationId;
+      const nextConversationTitle = hasConversationTitle
+        ? normalizeText(payload.currentConversationTitle)
+        : this.currentConversationTitle;
+
+      const contextChanged = nextConversationId !== this.currentConversationId
+        || nextConversationTitle !== this.currentConversationTitle;
+      this.currentConversationId = nextConversationId;
+      this.currentConversationTitle = nextConversationTitle;
+
+      let dataChanged = false;
 
       const conversations = Array.isArray(payload.conversations) ? payload.conversations : [];
       conversations.forEach((conversation) => {
@@ -372,29 +903,70 @@
         if (!conversationId) return;
         const title = normalizeText(conversation.title || conversationId);
         const url = conversation.url || `${location.origin}/c/${conversationId}`;
-        const updatedAt = Number(conversation.updatedAt) || Date.now();
-        this.data.conversations[conversationId] = {
-          id: conversationId,
-          title,
-          url,
-          updatedAt,
-        };
+        const existing = this.data.conversations[conversationId];
+        const incomingUpdatedAt = Number(conversation.updatedAt);
+        const nextUpdatedAt = existing
+          ? (Number.isFinite(incomingUpdatedAt) && incomingUpdatedAt > 0
+            ? Math.max(Number(existing.updatedAt) || 0, incomingUpdatedAt)
+            : Number(existing.updatedAt) || Date.now())
+          : (Number.isFinite(incomingUpdatedAt) && incomingUpdatedAt > 0
+            ? incomingUpdatedAt
+            : Date.now());
+        if (
+          !existing
+          || existing.title !== title
+          || existing.url !== url
+          || Number(existing.updatedAt || 0) !== nextUpdatedAt
+        ) {
+          this.data.conversations[conversationId] = {
+            id: conversationId,
+            title,
+            url,
+            updatedAt: nextUpdatedAt,
+          };
+          dataChanged = true;
+        }
       });
 
       if (this.currentConversationId) {
         const currentExisting = this.data.conversations[this.currentConversationId] || {};
+        const conversationSwitched = previousConversationId !== this.currentConversationId;
+        const nextUpdatedAt = conversationSwitched
+          ? Date.now()
+          : Number(currentExisting.updatedAt) || Date.now();
+        const nextTitle = this.currentConversationTitle || currentExisting.title || this.currentConversationId;
+        const nextUrl = `${location.origin}/c/${this.currentConversationId}`;
+        if (
+          !currentExisting.id
+          || currentExisting.title !== nextTitle
+          || currentExisting.url !== nextUrl
+          || Number(currentExisting.updatedAt || 0) !== nextUpdatedAt
+        ) {
+          dataChanged = true;
+        }
         this.data.conversations[this.currentConversationId] = {
           id: this.currentConversationId,
-          title: this.currentConversationTitle || currentExisting.title || this.currentConversationId,
-          url: `${location.origin}/c/${this.currentConversationId}`,
-          updatedAt: Date.now(),
+          title: nextTitle,
+          url: nextUrl,
+          updatedAt: nextUpdatedAt,
         };
       }
 
+      const beforeCount = Object.keys(this.data.conversations || {}).length;
       this.limitConversations();
-      this.render();
-      this.persistDataDebounced();
-      this.notifyCurrentFolderChange();
+      if (Object.keys(this.data.conversations || {}).length !== beforeCount) {
+        dataChanged = true;
+      }
+
+      if (dataChanged || contextChanged || !this.hasRendered) {
+        this.render();
+      }
+      if (dataChanged) {
+        this.persistDataDebounced();
+      }
+      if (dataChanged || contextChanged) {
+        this.notifyCurrentFolderChange();
+      }
     }
 
     getFolderName(conversationId) {
@@ -431,13 +1003,30 @@
       }
 
       if (!(this.ui.currentSelect instanceof HTMLSelectElement)) return;
-      this.ui.currentSelect.innerHTML = [
-        '<option value="">未分组</option>',
-        ...this.data.folders.map((folder) => `<option value="${folder.id}">${escapeHtml(folder.name)}</option>`),
-      ].join('');
+      const optionsHtml = this.buildFolderOptionsHtml();
       const selectedFolderId = this.data.conversationFolders[this.currentConversationId] || '';
-      this.ui.currentSelect.value = selectedFolderId;
-      this.ui.currentSelect.disabled = !this.currentConversationId;
+      this.renderFolderSelect(
+        this.ui.currentSelect,
+        optionsHtml,
+        selectedFolderId,
+        !this.currentConversationId
+      );
+    }
+
+    renderSidebarCurrentConversation() {
+      if (this.ui.sidebarCurrentTitle) {
+        this.ui.sidebarCurrentTitle.textContent = this.currentConversationTitle || '未识别到会话';
+      }
+      if (!(this.ui.sidebarCurrentSelect instanceof HTMLSelectElement)) return;
+
+      const optionsHtml = this.buildFolderOptionsHtml();
+      const selectedFolderId = this.data.conversationFolders[this.currentConversationId] || '';
+      this.renderFolderSelect(
+        this.ui.sidebarCurrentSelect,
+        optionsHtml,
+        selectedFolderId,
+        !this.currentConversationId
+      );
     }
 
     renderFolderList() {
@@ -476,7 +1065,6 @@
 
     renderConversationGroups() {
       if (!this.ui.conversationList) return;
-      const folderById = new Map(this.data.folders.map((folder) => [folder.id, folder]));
       const groups = new Map();
       groups.set('', []);
       this.data.folders.forEach((folder) => groups.set(folder.id, []));
@@ -502,7 +1090,77 @@
         sections.push(this.renderConversationGroupSection(folder.name, folder.color, list));
       });
 
-      this.ui.conversationList.innerHTML = sections.join('');
+      const html = sections.join('');
+      if (this.ui.conversationList.dataset.cedRenderedHtml !== html) {
+        this.ui.conversationList.innerHTML = html;
+        this.ui.conversationList.dataset.cedRenderedHtml = html;
+      }
+    }
+
+    renderSidebarConversationGroups() {
+      if (!this.ui.sidebarConversationList) return;
+      const groups = new Map();
+      groups.set('', []);
+      this.data.folders.forEach((folder) => groups.set(folder.id, []));
+
+      Object.values(this.data.conversations || {}).forEach((conversation) => {
+        const folderId = this.data.conversationFolders[conversation.id] || '';
+        if (!groups.has(folderId)) {
+          groups.set(folderId, []);
+        }
+        groups.get(folderId).push(conversation);
+      });
+
+      groups.forEach((list) => {
+        list.sort((a, b) => this.compareConversations(a, b));
+      });
+
+      const sections = [];
+      const ungrouped = groups.get('') || [];
+      sections.push(this.renderSidebarGroupSection('', '未分组', '#a9b8d0', ungrouped));
+
+      this.data.folders.forEach((folder) => {
+        const list = groups.get(folder.id) || [];
+        sections.push(this.renderSidebarGroupSection(folder.id, folder.name, folder.color, list));
+      });
+
+      const html = sections.join('');
+      if (this.ui.sidebarConversationList.dataset.cedRenderedHtml !== html) {
+        this.ui.sidebarConversationList.innerHTML = html;
+        this.ui.sidebarConversationList.dataset.cedRenderedHtml = html;
+      }
+
+      if (this.ui.sidebarSortSelect instanceof HTMLSelectElement) {
+        this.ui.sidebarSortSelect.value = this.data.sortMode;
+      }
+      this.enhanceNativeConversationDragTargets();
+    }
+
+    renderSidebarGroupSection(folderId, title, color, conversations) {
+      const safeGroupTitle = escapeHtml(title);
+      const safeFolderId = escapeHtml(folderId || '');
+      const rows = conversations.length
+        ? conversations.map((conversation) => {
+          const active = conversation.id === this.currentConversationId ? ' active' : '';
+          const safeTitle = escapeHtml(conversation.title);
+          const safeUrl = escapeHtml(conversation.url);
+          return `
+            <button type=\"button\" class=\"ced-folder-sidebar-conversation${active}\" data-action=\"open-conversation\" data-url=\"${safeUrl}\">
+              <span class=\"ced-folder-sidebar-conversation__title\">${safeTitle}</span>
+            </button>
+          `;
+        }).join('')
+        : '<div class=\"ced-folder-sidebar-empty-row\">暂无会话</div>';
+
+      return `
+        <div class=\"ced-folder-sidebar-group\" data-folder-id=\"${safeFolderId}\">
+          <div class=\"ced-folder-sidebar-group__title\">
+            <span class=\"ced-folder-group__dot\" style=\"--folder-color:${color};\"></span>
+            ${safeGroupTitle}
+          </div>
+          <div class=\"ced-folder-sidebar-group__list\">${rows}</div>
+        </div>
+      `;
     }
 
     renderConversationGroupSection(title, color, conversations) {
@@ -532,19 +1190,31 @@
     }
 
     render() {
-      if (!this.ui.section) return;
+      this.ensureSidebarSection();
+      if (!this.ui.section && !this.ui.sidebarSection) return;
       this.renderCurrentConversation();
+      this.renderSidebarCurrentConversation();
       this.renderFolderList();
       this.renderConversationGroups();
+      this.renderSidebarConversationGroups();
       if (this.ui.sortSelect instanceof HTMLSelectElement) {
         this.ui.sortSelect.value = this.data.sortMode;
       }
+      this.hasRendered = true;
     }
 
     destroy() {
       if (this.persistTimer) {
         clearTimeout(this.persistTimer);
         this.persistTimer = null;
+      }
+      if (this.sidebarEnsureTimer) {
+        clearTimeout(this.sidebarEnsureTimer);
+        this.sidebarEnsureTimer = null;
+      }
+      if (this.sidebarObserver) {
+        this.sidebarObserver.disconnect();
+        this.sidebarObserver = null;
       }
       if (this.ui.createButton) {
         this.ui.createButton.removeEventListener('click', this.handleCreateFolder);
@@ -561,8 +1231,43 @@
       if (this.ui.conversationList) {
         this.ui.conversationList.removeEventListener('click', this.handleConversationListClick);
       }
+      if (this.ui.sidebarCurrentSelect) {
+        this.ui.sidebarCurrentSelect.removeEventListener('change', this.handleSidebarCurrentFolderChange);
+      }
+      if (this.ui.sidebarSortSelect) {
+        this.ui.sidebarSortSelect.removeEventListener('change', this.handleSidebarSortChange);
+      }
+      if (this.sidebarHost) {
+        this.bindSidebarHost(null);
+      }
+      this.clearDragSourceAnchor();
+      if (this.ui.sidebarSection) {
+        this.ui.sidebarSection.removeEventListener('click', this.handleSidebarClick);
+        this.ui.sidebarSection.removeEventListener('pointerdown', this.handleSelectInteractionStart, true);
+        this.ui.sidebarSection.removeEventListener('keydown', this.handleSelectInteractionStart, true);
+        this.ui.sidebarSection.removeEventListener('focusin', this.handleSelectInteractionStart, true);
+        this.ui.sidebarSection.removeEventListener('focusout', this.handleSelectInteractionEnd, true);
+      }
+      if (this.ui.sidebarConversationList) {
+        this.ui.sidebarConversationList.removeEventListener('dragover', this.handleSidebarDragOver);
+        this.ui.sidebarConversationList.removeEventListener('dragleave', this.handleSidebarDragLeave);
+        this.ui.sidebarConversationList.removeEventListener('drop', this.handleSidebarDrop);
+      }
+      if (this.ui.section) {
+        this.ui.section.removeEventListener('pointerdown', this.handleSelectInteractionStart, true);
+        this.ui.section.removeEventListener('keydown', this.handleSelectInteractionStart, true);
+        this.ui.section.removeEventListener('focusin', this.handleSelectInteractionStart, true);
+        this.ui.section.removeEventListener('focusout', this.handleSelectInteractionEnd, true);
+      }
+      if (this.ui.sidebarCreateInput) {
+        this.ui.sidebarCreateInput.removeEventListener('blur', this.handleSidebarCreateInputBlur);
+        this.ui.sidebarCreateInput.removeEventListener('keydown', this.handleSidebarCreateInputKeydown);
+      }
       if (this.ui.section?.parentNode) {
         this.ui.section.parentNode.removeChild(this.ui.section);
+      }
+      if (this.ui.sidebarSection?.parentNode) {
+        this.ui.sidebarSection.parentNode.removeChild(this.ui.sidebarSection);
       }
       this.ui = {
         section: null,
@@ -574,7 +1279,17 @@
         sortSelect: null,
         folderList: null,
         conversationList: null,
+        sidebarSection: null,
+        sidebarCurrentTitle: null,
+        sidebarCurrentSelect: null,
+        sidebarSortSelect: null,
+        sidebarConversationList: null,
+        sidebarCreateButton: null,
+        sidebarCreateInline: null,
+        sidebarCreateInput: null,
       };
+      this.hasRendered = false;
+      this.sidebarInteractionLockUntil = 0;
     }
   }
 

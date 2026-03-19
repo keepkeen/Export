@@ -129,12 +129,18 @@
     panelTab: 'ced-panel-tab',
     formulaCopyFormat: 'ced-formula-copy-format',
     timelineEnabled: 'ced-timeline-enabled',
+    timelineDefaultOnApplied: 'ced-timeline-default-on-v1',
+    timelineScrollMode: 'ced-timeline-scroll-mode',
     titleUpdaterEnabled: 'ced-title-updater-enabled',
     titleUpdaterIncludeFolder: 'ced-title-updater-include-folder',
     sidebarAutoHideEnabled: 'ced-sidebar-autohide-enabled',
     folderSpacing: 'ced-folder-spacing',
     markdownPatcherEnabled: 'ced-markdown-patcher-enabled',
-    snowEffectEnabled: 'ced-snow-effect-enabled'
+    snowEffectEnabled: 'ced-snow-effect-enabled',
+    historyCleanerKeepRounds: 'ced-history-cleaner-keep-rounds',
+    historyCleanerAutoMaintain: 'ced-history-cleaner-auto-maintain',
+    contextSyncEnabled: 'ced-context-sync-enabled',
+    contextSyncPort: 'ced-context-sync-port'
   };
 
   const IMAGE_TOKEN_PREFIX = '__CED_IMAGE_';
@@ -342,19 +348,43 @@
     activePanelTab: PANEL_TABS.export,
     formulaCopyFormat: 'latex',
     timelineEnabled: true,
+    timelineScrollMode: 'flow',
     titleUpdaterEnabled: true,
     titleUpdaterIncludeFolder: true,
     sidebarAutoHideEnabled: false,
     folderSpacing: 2,
     markdownPatcherEnabled: true,
     snowEffectEnabled: true,
+    historyCleanerKeepRounds: 10,
+    historyCleanerAutoMaintain: false,
+    contextSyncEnabled: false,
+    contextSyncPort: 3030,
+    historyArchiveConversationKey: '',
+    historyArchiveRounds: [],
+    historyArchiveVersion: 0,
+    historyArchiveOpenMarkerId: '',
+    timelineMounting: false,
     timelineRefreshTimer: null,
+    heavyRefreshTimer: null,
+    metaRefreshTimer: null,
+    timelineEnsureTimer: null,
+    timelineWatchTimer: null,
+    observerFlushTimer: null,
+    observerImpactFlags: {
+      conversation: false,
+      meta: false
+    },
+    historyCleanerObserverMuteUntil: 0,
     timelineSummaryCache: new WeakMap(),
     timelineTurnsCache: {
       signature: '',
       turns: []
     }
   };
+  let storageSyncListenerBound = false;
+  let timelineVisibilityWatchBound = false;
+  let historyArchiveEventsBound = false;
+  const persistedValueCache = new Map();
 
   // --- 初始化 ---
   if (chrome?.runtime?.onMessage) {
@@ -377,8 +407,23 @@
           sendResponse?.({ ok: false, error: 'invalid patch' });
           return true;
         }
-        applySettingsPatch(patch);
+        applySettingsPatch(patch, { persist: false, source: 'runtime-message' });
         sendResponse?.({ ok: true });
+        return true;
+      }
+      if (message.type === 'CED_CONTEXT_CAPTURE') {
+        captureContextSyncPayload().then(
+          (payload) => sendResponse?.({ ok: true, payload }),
+          (error) => sendResponse?.({ ok: false, error: error?.message || String(error) })
+        );
+        return true;
+      }
+      if (message.type === 'CED_HISTORY_CLEANER_CHECK') {
+        sendResponse?.(getHistoryCleanerStats());
+        return true;
+      }
+      if (message.type === 'CED_HISTORY_CLEANER_TRIM') {
+        sendResponse?.(trimHistoryCleaner(message.keepRounds));
         return true;
       }
       return undefined;
@@ -391,9 +436,14 @@
     await ensureDocumentReady();
     patchHtml2canvasColorParser();
     await hydrateSettings();
+    registerStorageSyncListener();
     injectToast();
+    bindHistoryArchiveEvents();
     initFormulaCopyFeature();
+    initHistoryCleanerFeature();
     initTimelineFeature();
+    registerTimelineVisibilityWatch();
+    scheduleTimelineEnsure(0);
     initFolderFeature();
     initPromptVaultFeature();
     initTitleUpdaterFeature();
@@ -433,6 +483,25 @@
     setTimeout(() => state.toastEl && state.toastEl.classList.remove('ced-toast--visible'), duration);
   }
 
+  function bindHistoryArchiveEvents() {
+    if (historyArchiveEventsBound) return;
+    historyArchiveEventsBound = true;
+    document.addEventListener('click', (event) => {
+      const button = event.target instanceof HTMLElement
+        ? event.target.closest('.ced-archive-placeholder__toggle')
+        : null;
+      if (!(button instanceof HTMLButtonElement)) return;
+      const markerId = button.dataset.markerId || '';
+      if (!markerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const restored = restoreArchivedRound(markerId, { allowCollapse: true });
+      if (!restored) {
+        showToast('未找到归档内容');
+      }
+    }, true);
+  }
+
   async function hydrateSettings() {
     if (!chrome?.storage?.sync) return;
     const defaults = {
@@ -442,12 +511,18 @@
       [STORAGE_KEYS.panelTab]: state.activePanelTab,
       [STORAGE_KEYS.formulaCopyFormat]: state.formulaCopyFormat,
       [STORAGE_KEYS.timelineEnabled]: state.timelineEnabled,
+      [STORAGE_KEYS.timelineDefaultOnApplied]: false,
+      [STORAGE_KEYS.timelineScrollMode]: state.timelineScrollMode,
       [STORAGE_KEYS.titleUpdaterEnabled]: state.titleUpdaterEnabled,
       [STORAGE_KEYS.titleUpdaterIncludeFolder]: state.titleUpdaterIncludeFolder,
       [STORAGE_KEYS.sidebarAutoHideEnabled]: state.sidebarAutoHideEnabled,
       [STORAGE_KEYS.folderSpacing]: state.folderSpacing,
       [STORAGE_KEYS.markdownPatcherEnabled]: state.markdownPatcherEnabled,
-      [STORAGE_KEYS.snowEffectEnabled]: state.snowEffectEnabled
+      [STORAGE_KEYS.snowEffectEnabled]: state.snowEffectEnabled,
+      [STORAGE_KEYS.historyCleanerKeepRounds]: state.historyCleanerKeepRounds,
+      [STORAGE_KEYS.historyCleanerAutoMaintain]: state.historyCleanerAutoMaintain,
+      [STORAGE_KEYS.contextSyncEnabled]: state.contextSyncEnabled,
+      [STORAGE_KEYS.contextSyncPort]: state.contextSyncPort
     };
     const stored = await new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
     if (stored[STORAGE_KEYS.format]) state.selectedFormat = stored[STORAGE_KEYS.format];
@@ -463,7 +538,17 @@
     if (typeof stored[STORAGE_KEYS.timelineEnabled] === 'boolean') {
       state.timelineEnabled = stored[STORAGE_KEYS.timelineEnabled];
     }
+    const timelineDefaultApplied = stored[STORAGE_KEYS.timelineDefaultOnApplied] === true;
+    if (!timelineDefaultApplied) {
+      state.timelineEnabled = true;
+      persist(STORAGE_KEYS.timelineEnabled, true);
+      persist(STORAGE_KEYS.timelineDefaultOnApplied, true);
+    }
     state.timelineEnabled = normalizeTimelineEnabled(state.timelineEnabled);
+    if (typeof stored[STORAGE_KEYS.timelineScrollMode] === 'string') {
+      state.timelineScrollMode = stored[STORAGE_KEYS.timelineScrollMode];
+    }
+    state.timelineScrollMode = normalizeTimelineScrollMode(state.timelineScrollMode);
     if (typeof stored[STORAGE_KEYS.titleUpdaterEnabled] === 'boolean') {
       state.titleUpdaterEnabled = stored[STORAGE_KEYS.titleUpdaterEnabled];
     }
@@ -484,15 +569,67 @@
     if (typeof stored[STORAGE_KEYS.snowEffectEnabled] === 'boolean') {
       state.snowEffectEnabled = stored[STORAGE_KEYS.snowEffectEnabled];
     }
+    if (typeof stored[STORAGE_KEYS.historyCleanerKeepRounds] === 'number') {
+      state.historyCleanerKeepRounds = stored[STORAGE_KEYS.historyCleanerKeepRounds];
+    }
+    if (typeof stored[STORAGE_KEYS.historyCleanerAutoMaintain] === 'boolean') {
+      state.historyCleanerAutoMaintain = stored[STORAGE_KEYS.historyCleanerAutoMaintain];
+    }
+    if (typeof stored[STORAGE_KEYS.contextSyncEnabled] === 'boolean') {
+      state.contextSyncEnabled = stored[STORAGE_KEYS.contextSyncEnabled];
+    }
+    if (typeof stored[STORAGE_KEYS.contextSyncPort] === 'number') {
+      state.contextSyncPort = stored[STORAGE_KEYS.contextSyncPort];
+    }
     state.sidebarAutoHideEnabled = normalizeSidebarAutoHideEnabled(state.sidebarAutoHideEnabled);
     state.folderSpacing = normalizeFolderSpacing(state.folderSpacing);
     state.markdownPatcherEnabled = normalizeMarkdownPatcherEnabled(state.markdownPatcherEnabled);
     state.snowEffectEnabled = normalizeSnowEffectEnabled(state.snowEffectEnabled);
+    state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds);
+    state.historyCleanerAutoMaintain = normalizeHistoryCleanerAutoMaintain(state.historyCleanerAutoMaintain);
+    state.contextSyncEnabled = normalizeContextSyncEnabled(state.contextSyncEnabled);
+    state.contextSyncPort = normalizeContextSyncPort(state.contextSyncPort);
   }
 
   function persist(key, value) {
     if (!chrome?.storage?.sync) return;
+    if (persistedValueCache.has(key) && Object.is(persistedValueCache.get(key), value)) {
+      return;
+    }
+    persistedValueCache.set(key, value);
     chrome.storage.sync.set({ [key]: value });
+  }
+
+  function registerStorageSyncListener() {
+    if (storageSyncListenerBound) return;
+    if (!chrome?.storage?.onChanged?.addListener) return;
+    storageSyncListenerBound = true;
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'sync' || !changes || typeof changes !== 'object') return;
+      const patch = {};
+      const keys = [
+        STORAGE_KEYS.formulaCopyFormat,
+        STORAGE_KEYS.timelineEnabled,
+        STORAGE_KEYS.timelineScrollMode,
+        STORAGE_KEYS.titleUpdaterEnabled,
+        STORAGE_KEYS.titleUpdaterIncludeFolder,
+        STORAGE_KEYS.sidebarAutoHideEnabled,
+        STORAGE_KEYS.folderSpacing,
+        STORAGE_KEYS.markdownPatcherEnabled,
+        STORAGE_KEYS.snowEffectEnabled,
+        STORAGE_KEYS.historyCleanerKeepRounds,
+        STORAGE_KEYS.historyCleanerAutoMaintain,
+        STORAGE_KEYS.contextSyncEnabled,
+        STORAGE_KEYS.contextSyncPort,
+      ];
+      keys.forEach((key) => {
+        if (!Object.prototype.hasOwnProperty.call(changes, key)) return;
+        patch[key] = changes[key]?.newValue;
+        persistedValueCache.set(key, changes[key]?.newValue);
+      });
+      if (!Object.keys(patch).length) return;
+      applySettingsPatch(patch, { persist: false, source: 'storage-sync' });
+    });
   }
 
   function attachPanel() {
@@ -524,6 +661,7 @@
 
     const exportPanel = panel.querySelector(`[data-ced-tab-panel="${PANEL_TABS.export}"]`);
     if (exportPanel instanceof HTMLElement) {
+      exportPanel.appendChild(buildOverviewSection());
       exportPanel.appendChild(buildFormatSection());
       exportPanel.appendChild(buildFileNameSection());
       exportPanel.appendChild(buildTurnsSection());
@@ -605,12 +743,18 @@
     if (shouldPersist) {
       persist(STORAGE_KEYS.panelTab, state.activePanelTab);
     }
+    if (state.panelEl?.classList.contains('ced-panel--open') && state.activePanelTab === PANEL_TABS.export) {
+      scheduleHeavyRefresh(0);
+    }
   }
 
   function buildFormatSection() {
     const section = document.createElement('section');
     section.className = 'ced-section';
-    section.innerHTML = '<div class="ced-section__title">导出格式</div>';
+    section.innerHTML = `
+      <div class="ced-section__title">导出格式</div>
+      <div class="ced-section__desc">选择当前会话的输出方式。格式切换会立即同步到时间线预览导出区。</div>
+    `;
     const grid = document.createElement('div');
     grid.className = 'ced-format-grid';
 
@@ -628,6 +772,8 @@
           .querySelectorAll('.ced-format-button')
           .forEach((b) => b.classList.remove('ced-format-button--active'));
         btn.classList.add('ced-format-button--active');
+        refreshPanelOverview();
+        refreshActionSection();
       });
       grid.appendChild(btn);
     });
@@ -635,10 +781,42 @@
     return section;
   }
 
+  function buildOverviewSection() {
+    const section = document.createElement('section');
+    section.className = 'ced-section ced-section--overview';
+    section.innerHTML = `
+      <div class="ced-section__title">导出概览</div>
+      <div class="ced-section__desc">先确认会话标题、选中轮次和导出格式，再执行导出。</div>
+      <div class="ced-overview-grid">
+        <div class="ced-overview-card ced-overview-card--wide">
+          <div class="ced-overview-card__label">当前会话</div>
+          <div class="ced-overview-card__value" data-ced-overview="title">检测中...</div>
+        </div>
+        <div class="ced-overview-card">
+          <div class="ced-overview-card__label">选中轮次</div>
+          <div class="ced-overview-card__value" data-ced-overview="selection">0 / 0</div>
+        </div>
+        <div class="ced-overview-card">
+          <div class="ced-overview-card__label">导出格式</div>
+          <div class="ced-overview-card__value" data-ced-overview="format">Text</div>
+        </div>
+        <div class="ced-overview-card ced-overview-card--wide">
+          <div class="ced-overview-card__label">文件命名</div>
+          <div class="ced-overview-card__value" data-ced-overview="filename">自动使用会话标题</div>
+        </div>
+      </div>
+    `;
+    refreshPanelOverview();
+    return section;
+  }
+
   function buildFileNameSection() {
     const section = document.createElement('section');
     section.className = 'ced-section';
-    section.innerHTML = '<div class="ced-section__title">文件命名</div>';
+    section.innerHTML = `
+      <div class="ced-section__title">文件命名</div>
+      <div class="ced-section__desc">留空时自动使用会话标题；适合按项目或主题自定义归档名。</div>
+    `;
     const input = document.createElement('input');
     input.className = 'ced-input';
     input.value = state.fileName;
@@ -646,6 +824,7 @@
     input.addEventListener('input', () => {
       state.fileName = input.value.trim();
       persist(STORAGE_KEYS.fileName, state.fileName);
+      refreshPanelOverview();
     });
     state.nameInput = input;
     section.appendChild(input);
@@ -881,7 +1060,10 @@
   function buildTurnsSection() {
     const section = document.createElement('section');
     section.className = 'ced-section';
-    section.innerHTML = '<div class="ced-section__title">对话轮次</div>';
+    section.innerHTML = `
+      <div class="ced-section__title">对话轮次</div>
+      <div class="ced-section__desc">点击卡片即可勾选要导出的轮次；未特殊选择时默认全选。</div>
+    `;
     const list = document.createElement('div');
     list.className = 'ced-turn-list';
     list.dataset.list = 'turns';
@@ -891,12 +1073,15 @@
 
   function buildActionSection() {
     const section = document.createElement('section');
-    section.className = 'ced-section';
+    section.className = 'ced-section ced-section--sticky-actions';
     section.innerHTML = `
+      <div class="ced-section__title">执行导出</div>
+      <div class="ced-section__desc">扩展注入的 UI 会自动从导出结果中剔除，不会污染内容。</div>
       <div class="ced-actions">
-        <button class="ced-button ced-button--ghost" data-ced-action="select-all">全选 / 取消</button>
-        <button class="ced-button ced-button--primary" data-ced-action="export">立即导出</button>
+        <button class="ced-button ced-button--ghost" data-ced-action="select-all">全选全部</button>
+        <button class="ced-button ced-button--primary" data-ced-action="export">导出选中内容</button>
       </div>`;
+    refreshActionSection();
     return section;
   }
 
@@ -916,13 +1101,14 @@
 
     if (shouldOpen) {
       panel.classList.add('ced-panel--open');
-      refreshConversationData();
+      scheduleHeavyRefresh(0);
     }
   }
 
   // --- 数据解析 (Data Parsing) ---
 
   async function refreshConversationData() {
+    syncHistoryArchiveContext();
     const token = ++state.lastRefreshToken;
     const previousTurnsLength = state.turns.length;
     const previousSelection = new Set(state.selectedTurnIds);
@@ -1013,7 +1199,7 @@
 
   function isLikelyMessageNode(node) {
     if (!(node instanceof HTMLElement)) return false;
-    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return false;
+    if (node.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-launcher, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas, .ced-archive-placeholder')) return false;
 
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -1313,6 +1499,10 @@
     return value !== false;
   }
 
+  function normalizeTimelineScrollMode(value) {
+    return value === 'jump' ? 'jump' : 'flow';
+  }
+
   function normalizeTitleUpdaterEnabled(value) {
     return value !== false;
   }
@@ -1337,6 +1527,26 @@
 
   function normalizeSnowEffectEnabled(value) {
     return value === true;
+  }
+
+  function normalizeHistoryCleanerKeepRounds(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 10;
+    return Math.max(1, Math.min(100, Math.round(numeric)));
+  }
+
+  function normalizeHistoryCleanerAutoMaintain(value) {
+    return value === true;
+  }
+
+  function normalizeContextSyncEnabled(value) {
+    return value === true;
+  }
+
+  function normalizeContextSyncPort(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 3030;
+    return Math.max(1, Math.min(65535, Math.round(numeric)));
   }
 
   function extractConversationIdFromUrl(url) {
@@ -1375,8 +1585,7 @@
         list.push({
           id: conversationId,
           title: title || conversationId,
-          url,
-          updatedAt: Date.now()
+          url
         });
       });
     });
@@ -1405,15 +1614,29 @@
   function initTimelineFeature() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     state.timelineEnabled = normalizeTimelineEnabled(state.timelineEnabled);
-    if (window.__cedTimeline?.initialize) {
+    state.timelineScrollMode = normalizeTimelineScrollMode(state.timelineScrollMode);
+    if (!window.__cedTimeline?.initialize) return;
+    const alreadyMounted = document.querySelector('.ced-timeline-bar') instanceof HTMLElement;
+    if (alreadyMounted) {
+      window.__cedTimeline.configure?.({
+        enabled: state.timelineEnabled,
+        scrollMode: state.timelineScrollMode,
+      });
+      return;
+    }
+    if (state.timelineMounting) return;
+    state.timelineMounting = true;
+    try {
+      // If the host page re-mounted body and timeline node was lost, recreate it from scratch.
+      window.__cedTimeline.destroy?.();
       window.__cedTimeline.initialize({
         enabled: state.timelineEnabled,
         markerRole: 'user',
         maxMarkers: 320,
         shortcutEnabled: true,
-        draggable: true,
         previewEnabled: true,
         exportQuickEnabled: true,
+        scrollMode: state.timelineScrollMode,
         getTurns: collectTimelineTurnsFast,
         getExportConfig: getTimelineExportConfig,
         onExportConfigChange: applyTimelineExportConfigPatch,
@@ -1422,13 +1645,25 @@
         userRoleSelector: SELECTORS.ROLE_USER,
         scrollContainerSelectors: SCROLL_CONTAINER_SELECTORS
       });
+    } finally {
+      state.timelineMounting = false;
     }
   }
 
   function syncTimelineFeatureConfig() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     state.timelineEnabled = normalizeTimelineEnabled(state.timelineEnabled);
-    window.__cedTimeline?.setEnabled?.(state.timelineEnabled);
+    state.timelineScrollMode = normalizeTimelineScrollMode(state.timelineScrollMode);
+    if (state.timelineEnabled && !(document.querySelector('.ced-timeline-bar') instanceof HTMLElement)) {
+      initTimelineFeature();
+    }
+    window.__cedTimeline?.configure?.({
+      enabled: state.timelineEnabled,
+      scrollMode: state.timelineScrollMode,
+    });
+    if (state.timelineEnabled) {
+      scheduleTimelineEnsure(0);
+    }
     refreshTimelineFeature();
   }
 
@@ -1442,32 +1677,124 @@
     if (state.timelineRefreshTimer) {
       clearTimeout(state.timelineRefreshTimer);
     }
+    const delay = document.hidden ? 520 : 170;
     state.timelineRefreshTimer = setTimeout(() => {
       state.timelineRefreshTimer = null;
+      ensureTimelineMounted();
       refreshTimelineFeature();
-    }, 120);
+    }, delay);
   }
 
-  function collectTimelineTurnsFast() {
+  function ensureTimelineMounted() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (!state.timelineEnabled) return;
+    const bar = document.querySelector('.ced-timeline-bar');
+    if (!(bar instanceof HTMLElement)) {
+      initTimelineFeature();
+      return;
+    }
+    bar.classList.remove('ced-timeline-bar--hidden');
+    bar.style.setProperty('display', 'block', 'important');
+    bar.style.setProperty('visibility', 'visible', 'important');
+    bar.style.setProperty('opacity', '1', 'important');
+    bar.style.setProperty('position', 'fixed', 'important');
+    bar.style.setProperty('left', 'auto', 'important');
+    bar.style.setProperty('right', 'clamp(10px, 1vw + 4px, 20px)', 'important');
+    bar.style.setProperty('top', 'clamp(56px, 6vh, 88px)', 'important');
+    bar.style.setProperty('height', 'calc(100vh - clamp(120px, 12vh, 160px))', 'important');
+    bar.style.setProperty('z-index', '2147483646', 'important');
+    bar.style.setProperty('pointer-events', 'auto', 'important');
+  }
+
+  function scheduleTimelineEnsure(delay = 400) {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (state.timelineEnsureTimer) {
+      clearTimeout(state.timelineEnsureTimer);
+    }
+    state.timelineEnsureTimer = setTimeout(() => {
+      state.timelineEnsureTimer = null;
+      ensureTimelineMounted();
+      refreshTimelineFeature();
+    }, Math.max(0, delay));
+  }
+
+  function registerTimelineVisibilityWatch() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (timelineVisibilityWatchBound) return;
+    timelineVisibilityWatchBound = true;
+
+    const ensureVisibleSoon = () => {
+      if (!state.timelineEnabled) return;
+      scheduleTimelineEnsure(document.hidden ? 220 : 40);
+    };
+
+    document.addEventListener('visibilitychange', ensureVisibleSoon, { passive: true });
+    window.addEventListener('resize', ensureVisibleSoon, { passive: true });
+
+    if (state.timelineWatchTimer) {
+      clearInterval(state.timelineWatchTimer);
+    }
+    state.timelineWatchTimer = setInterval(() => {
+      if (!state.timelineEnabled) return;
+      ensureTimelineMounted();
+    }, 1200);
+  }
+
+  function scheduleHeavyRefresh(delay = 720) {
+    if (state.heavyRefreshTimer) {
+      clearTimeout(state.heavyRefreshTimer);
+    }
+    state.heavyRefreshTimer = setTimeout(() => {
+      state.heavyRefreshTimer = null;
+      refreshConversationData();
+    }, Math.max(0, delay));
+  }
+
+  function isExportPanelOpen() {
+    return !!(state.panelEl?.classList.contains('ced-panel--open') && state.activePanelTab === PANEL_TABS.export);
+  }
+
+  function shouldRunHeavyRefresh() {
+    return state.exporting || isExportPanelOpen();
+  }
+
+  function refreshPageMetaOnly() {
+    state.pageTitle = detectConversationTitle();
+    if (state.nameInput) {
+      state.nameInput.placeholder = state.pageTitle || ACTIVE_SITE.defaultTitle;
+    }
+    refreshFolderFeature();
+    refreshTitleUpdaterFeature();
+  }
+
+  function scheduleMetaRefresh(delay = 240) {
+    if (state.metaRefreshTimer) {
+      clearTimeout(state.metaRefreshTimer);
+    }
+    state.metaRefreshTimer = setTimeout(() => {
+      state.metaRefreshTimer = null;
+      refreshPageMetaOnly();
+    }, Math.max(0, delay));
+  }
+
+  function collectConversationTurnNodesFast() {
+    syncHistoryArchiveContext();
     if (SITE_KEY !== SITE_KEYS.chatgpt) return [];
     const fastNodes = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'))
       .filter((node) => node instanceof HTMLElement);
-    const nodes = (fastNodes.length ? fastNodes : dedupeMessageNodes(Array.from(document.querySelectorAll(SELECTORS.MESSAGE_TURN))))
+    return (fastNodes.length ? fastNodes : dedupeMessageNodes(Array.from(document.querySelectorAll(SELECTORS.MESSAGE_TURN))))
       .filter((node) => node instanceof HTMLElement);
+  }
 
-    if (!nodes.length) {
+  function collectTimelineTurnsFast() {
+    const nodes = collectConversationTurnNodesFast();
+    const archivedTurns = collectArchivedTimelineTurns();
+    if (!nodes.length && !archivedTurns.length) {
       state.timelineTurnsCache = { signature: '', turns: [] };
       return [];
     }
 
-    const firstId = nodes[0]?.getAttribute('data-testid') || '';
-    const lastId = nodes[nodes.length - 1]?.getAttribute('data-testid') || '';
-    const signature = `${nodes.length}|${firstId}|${lastId}`;
-    if (state.timelineTurnsCache.signature === signature && Array.isArray(state.timelineTurnsCache.turns) && state.timelineTurnsCache.turns.length) {
-      return state.timelineTurnsCache.turns;
-    }
-
-    const turns = nodes.map((node, index) => {
+    const liveTurns = nodes.map((node, index) => {
       const role = detectNodeRole(node);
       const contentNode = resolveContentNode(node, role) || node;
       const text = getTimelineSummaryText(contentNode);
@@ -1479,12 +1806,294 @@
         role,
         node,
         text,
-        preview: text
+        preview: text,
+        archived: false,
+        restored: false,
       };
     }).filter((turn) => turn.node instanceof HTMLElement);
 
+    const combined = [...archivedTurns, ...liveTurns]
+      .filter((turn) => turn?.node instanceof HTMLElement)
+      .sort((a, b) => {
+        if (a.node === b.node) return 0;
+        const position = a.node.compareDocumentPosition(b.node);
+        if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+        if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+        return 0;
+      });
+
+    const firstId = combined[0]?.id || '';
+    const lastId = combined[combined.length - 1]?.id || '';
+    const tailSummary = String(combined[combined.length - 1]?.preview || combined[combined.length - 1]?.text || '').slice(0, 80);
+    const signature = `${location.pathname}|${combined.length}|${firstId}|${lastId}|${tailSummary}|${state.historyArchiveVersion}`;
+    if (state.timelineTurnsCache.signature === signature && Array.isArray(state.timelineTurnsCache.turns) && state.timelineTurnsCache.turns.length) {
+      return state.timelineTurnsCache.turns;
+    }
+
+    const turns = combined;
     state.timelineTurnsCache = { signature, turns };
     return turns;
+  }
+
+  function collectHistoryCleanerTurnsFast() {
+    const nodes = collectConversationTurnNodesFast();
+    return nodes.map((node, index) => {
+      const role = detectNodeRole(node);
+      const id = node.dataset.cedMessageId
+        || node.getAttribute('data-testid')
+        || `history-${index}`;
+      return {
+        id: `${id}-${index}`,
+        role,
+        node,
+      };
+    }).filter((turn) => turn.node instanceof HTMLElement);
+  }
+
+  function getHistoryArchiveConversationKey() {
+    const conversationId = getCurrentConversationId();
+    if (conversationId) return `chatgpt:${conversationId}`;
+    return `chatgpt:${location.pathname || location.href}`;
+  }
+
+  function syncHistoryArchiveContext() {
+    const nextKey = getHistoryArchiveConversationKey();
+    if (state.historyArchiveConversationKey === nextKey) {
+      return;
+    }
+    clearHistoryArchive();
+    state.historyArchiveConversationKey = nextKey;
+  }
+
+  function clearHistoryArchive() {
+    state.historyArchiveRounds.forEach((round) => {
+      if (round?.placeholderEl instanceof HTMLElement && round.placeholderEl.isConnected) {
+        round.placeholderEl.remove();
+      }
+    });
+    state.historyArchiveRounds = [];
+    state.historyArchiveVersion += 1;
+    state.historyArchiveOpenMarkerId = '';
+  }
+
+  function estimateElementOuterHeight(element) {
+    if (!(element instanceof HTMLElement)) return 0;
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    const marginTop = Number.parseFloat(style.marginTop || '0') || 0;
+    const marginBottom = Number.parseFloat(style.marginBottom || '0') || 0;
+    return Math.max(0, rect.height + marginTop + marginBottom);
+  }
+
+  function snapshotTurnForArchive(turn) {
+    if (!turn?.node || !(turn.node instanceof HTMLElement)) return null;
+    const role = turn.role === 'user' ? 'user' : 'assistant';
+    const contentNode = resolveContentNode(turn.node, role) || turn.node;
+    const visualClone = contentNode.cloneNode(true);
+    staticizeDynamicContent(contentNode, visualClone);
+    replaceButtonsWithSpans(visualClone);
+    visualClone.querySelectorAll('.sr-only, script, style').forEach((el) => el.remove());
+    const preview = getTimelineSummaryText(contentNode) || `${formatRole(role)} 内容`;
+    return {
+      id: turn.id,
+      role,
+      preview,
+      html: visualClone.outerHTML || `<div>${escapeHtml(contentNode.textContent || '')}</div>`,
+    };
+  }
+
+  function buildArchivedRoundChunks(removableTurns) {
+    const chunks = [];
+    let currentChunk = null;
+
+    const pushCurrentChunk = () => {
+      if (!currentChunk || !currentChunk.turns.length || !(currentChunk.placeholderAnchor instanceof HTMLElement)) return;
+      chunks.push(currentChunk);
+      currentChunk = null;
+    };
+
+    removableTurns.forEach((turn, index) => {
+      if (!turn?.node || !(turn.node instanceof HTMLElement)) return;
+      const startsNewChunk = !currentChunk || turn.role === 'user';
+      if (startsNewChunk) {
+        pushCurrentChunk();
+        currentChunk = {
+          markerId: turn.id || `archived-${index}`,
+          role: turn.role === 'user' ? 'user' : 'assistant',
+          summary: turn.preview || turn.text || `第 ${index + 1} 轮`,
+          turns: [],
+          collapsedHeight: 0,
+          placeholderAnchor: turn.node,
+          placeholderEl: null,
+          restored: false,
+        };
+      }
+
+      const snapshot = snapshotTurnForArchive(turn);
+      if (snapshot) {
+        currentChunk.turns.push(snapshot);
+      }
+      currentChunk.collapsedHeight += estimateElementOuterHeight(turn.node);
+
+      if (turn.role === 'user') {
+        currentChunk.markerId = turn.id || currentChunk.markerId;
+        currentChunk.role = 'user';
+        currentChunk.summary = turn.preview || turn.text || currentChunk.summary;
+      }
+    });
+
+    pushCurrentChunk();
+    return chunks.filter((chunk) => chunk.turns.length && chunk.placeholderAnchor instanceof HTMLElement);
+  }
+
+  function updateArchivePlaceholderUi(round) {
+    const placeholderEl = round?.placeholderEl;
+    if (!(placeholderEl instanceof HTMLElement)) return;
+    const button = placeholderEl.querySelector('.ced-archive-placeholder__toggle');
+    const summaryEl = placeholderEl.querySelector('.ced-archive-placeholder__summary');
+    const metaEl = placeholderEl.querySelector('.ced-archive-placeholder__meta');
+    const contentEl = placeholderEl.querySelector('.ced-archive-placeholder__content');
+    const restored = round.restored === true;
+    placeholderEl.classList.toggle('is-restored', restored);
+    if (contentEl instanceof HTMLElement) {
+      contentEl.hidden = !restored;
+    }
+    if (button instanceof HTMLButtonElement) {
+      button.dataset.markerId = round.markerId;
+      button.setAttribute('aria-expanded', restored ? 'true' : 'false');
+    }
+    if (summaryEl instanceof HTMLElement) {
+      summaryEl.textContent = round.summary || '已归档历史轮次';
+    }
+    if (metaEl instanceof HTMLElement) {
+      const turnCount = round.turns?.length || 0;
+      metaEl.textContent = restored
+        ? `已恢复 ${turnCount} 条消息 · 点击折叠`
+        : `已归档 ${turnCount} 条消息 · 点击恢复`;
+    }
+    if (!restored) {
+      placeholderEl.style.height = `${Math.max(52, Math.round(round.collapsedHeight || 52))}px`;
+    } else {
+      placeholderEl.style.height = 'auto';
+      placeholderEl.style.minHeight = `${Math.max(52, Math.round(round.collapsedHeight || 52))}px`;
+    }
+  }
+
+  function createHistoryArchivePlaceholder(round) {
+    const placeholder = document.createElement('section');
+    placeholder.className = 'ced-archive-placeholder';
+    placeholder.dataset.markerId = round.markerId;
+    placeholder.dataset.archived = '1';
+    placeholder.innerHTML = `
+      <button type="button" class="ced-archive-placeholder__toggle" data-marker-id="${escapeHtml(round.markerId)}" aria-expanded="false">
+        <span class="ced-archive-placeholder__summary"></span>
+        <span class="ced-archive-placeholder__meta"></span>
+      </button>
+      <div class="ced-archive-placeholder__content" hidden></div>
+    `;
+    round.placeholderEl = placeholder;
+    updateArchivePlaceholderUi(round);
+    return placeholder;
+  }
+
+  function renderArchivedRoundHtml(round) {
+    const turns = Array.isArray(round?.turns) ? round.turns : [];
+    return turns.map((turn) => {
+      const roleClass = turn.role === 'user' ? 'user' : 'assistant';
+      const roleLabel = turn.role === 'user' ? 'User' : 'Assistant';
+      return `
+        <article class="ced-archive-turn ced-archive-turn--${roleClass}">
+          <div class="ced-archive-turn__role">${roleLabel}</div>
+          <div class="ced-archive-turn__body">${turn.html || `<div>${escapeHtml(turn.preview || '')}</div>`}</div>
+        </article>
+      `;
+    }).join('');
+  }
+
+  function collapseArchivedRound(round) {
+    if (!round || !(round.placeholderEl instanceof HTMLElement)) return false;
+    const contentEl = round.placeholderEl.querySelector('.ced-archive-placeholder__content');
+    if (contentEl instanceof HTMLElement) {
+      contentEl.innerHTML = '';
+      contentEl.hidden = true;
+    }
+    round.restored = false;
+    if (state.historyArchiveOpenMarkerId === round.markerId) {
+      state.historyArchiveOpenMarkerId = '';
+    }
+    updateArchivePlaceholderUi(round);
+    state.historyArchiveVersion += 1;
+    scheduleTimelineRefresh();
+    return true;
+  }
+
+  function collapseOtherArchivedRounds(exceptMarkerId = '') {
+    state.historyArchiveRounds.forEach((round) => {
+      if (!round || round.markerId === exceptMarkerId || round.restored !== true) return;
+      collapseArchivedRound(round);
+    });
+  }
+
+  function restoreArchivedRound(markerId, options = {}) {
+    syncHistoryArchiveContext();
+    const round = state.historyArchiveRounds.find((item) => item.markerId === markerId);
+    if (!round || !(round.placeholderEl instanceof HTMLElement)) return null;
+
+    if (round.restored === true) {
+      if (options.allowCollapse === true) {
+        collapseArchivedRound(round);
+        return round.placeholderEl;
+      }
+      return round.placeholderEl;
+    }
+
+    collapseOtherArchivedRounds(markerId);
+    const contentEl = round.placeholderEl.querySelector('.ced-archive-placeholder__content');
+    if (contentEl instanceof HTMLElement && !contentEl.innerHTML) {
+      contentEl.innerHTML = renderArchivedRoundHtml(round);
+      contentEl.hidden = false;
+    }
+    round.restored = true;
+    state.historyArchiveOpenMarkerId = markerId;
+    updateArchivePlaceholderUi(round);
+    state.historyArchiveVersion += 1;
+    scheduleTimelineRefresh();
+    return round.placeholderEl;
+  }
+
+  function collectArchivedTimelineTurns() {
+    syncHistoryArchiveContext();
+    return state.historyArchiveRounds
+      .filter((round) => round?.placeholderEl instanceof HTMLElement && round.placeholderEl.isConnected)
+      .map((round) => ({
+        id: round.markerId,
+        role: round.role || 'user',
+        node: round.placeholderEl,
+        text: round.summary || '',
+        preview: round.summary || '',
+        archived: true,
+        restored: round.restored === true,
+        onActivate: () => restoreArchivedRound(round.markerId),
+      }));
+  }
+
+  function prepareHistoryArchiveBeforeTrim(payload = {}) {
+    syncHistoryArchiveContext();
+    const removableTurns = Array.isArray(payload.removableTurns) ? payload.removableTurns : [];
+    if (!removableTurns.length) return;
+
+    const chunks = buildArchivedRoundChunks(removableTurns);
+    if (!chunks.length) return;
+
+    chunks.forEach((chunk) => {
+      if (!(chunk.placeholderAnchor instanceof HTMLElement)) return;
+      if (state.historyArchiveRounds.some((item) => item.markerId === chunk.markerId)) return;
+      const placeholder = createHistoryArchivePlaceholder(chunk);
+      chunk.placeholderAnchor.before(placeholder);
+      state.historyArchiveRounds.push(chunk);
+    });
+
+    state.historyArchiveVersion += 1;
   }
 
   function getTimelineSummaryText(node) {
@@ -1533,6 +2142,51 @@
 
   function triggerTimelineQuickExport() {
     exportSelection();
+  }
+
+  async function captureContextSyncPayload() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) {
+      throw new Error('当前站点暂不支持 Context Sync');
+    }
+    if (!normalizeContextSyncEnabled(state.contextSyncEnabled)) {
+      throw new Error('Context Sync 未启用');
+    }
+
+    await refreshConversationData();
+    const turns = Array.isArray(state.turns) ? state.turns : [];
+    const payload = turns.map((turn, index) => {
+      const node = turn.node instanceof HTMLElement ? turn.node : null;
+      const rect = node?.getBoundingClientRect();
+      const text = String(turn.markdownResolved || turn.markdown || turn.text || turn.preview || '')
+        .replace(/\u00a0/g, ' ')
+        .trim();
+
+      const images = Array.isArray(turn.images)
+        ? turn.images
+          .map((img) => img?.dataUrl || img?.src || '')
+          .filter(Boolean)
+        : [];
+
+      return {
+        id: turn.id || `turn-${index}`,
+        index,
+        url: location.href,
+        className: node?.className || '',
+        role: turn.role === 'user' ? 'user' : 'assistant',
+        text,
+        images,
+        is_ai_likely: turn.role !== 'user',
+        is_user_likely: turn.role === 'user',
+        rect: {
+          top: rect ? Number(rect.top.toFixed(2)) : 0,
+          left: rect ? Number(rect.left.toFixed(2)) : 0,
+          width: rect ? Number(rect.width.toFixed(2)) : 0,
+          height: rect ? Number(rect.height.toFixed(2)) : 0
+        }
+      };
+    }).filter((item) => item.text || item.images.length);
+
+    return payload;
   }
 
   function initFolderFeature() {
@@ -1662,8 +2316,82 @@
     window.__cedSnowEffect?.setEnabled?.(state.snowEffectEnabled);
   }
 
-  function applySettingsPatch(patch) {
+  function initHistoryCleanerFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds);
+    state.historyCleanerAutoMaintain = normalizeHistoryCleanerAutoMaintain(state.historyCleanerAutoMaintain);
+    window.__cedHistoryCleaner?.initialize?.({
+      enabled: state.historyCleanerAutoMaintain,
+      keepRounds: state.historyCleanerKeepRounds,
+      getTurns: collectHistoryCleanerTurnsFast,
+      getObserveTarget: getConversationObserveTarget,
+      beforeTrim: prepareHistoryArchiveBeforeTrim,
+      onTrim: handleHistoryCleanerTrim,
+    });
+  }
+
+  function syncHistoryCleanerFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds);
+    state.historyCleanerAutoMaintain = normalizeHistoryCleanerAutoMaintain(state.historyCleanerAutoMaintain);
+    window.__cedHistoryCleaner?.setConfig?.({
+      enabled: state.historyCleanerAutoMaintain,
+      keepRounds: state.historyCleanerKeepRounds,
+    });
+  }
+
+  function handleHistoryCleanerTrim(_result) {
+    muteConversationObserverFor(document.hidden ? 420 : 240);
+    state.timelineTurnsCache.signature = '';
+    scheduleTimelineEnsure(0);
+    scheduleTimelineRefresh();
+    if (shouldRunHeavyRefresh()) {
+      scheduleHeavyRefresh(0);
+    }
+  }
+
+  function getHistoryCleanerStats() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) {
+      return { ok: false, message: '当前站点暂不支持 History Cleaner', rounds: 0, messages: 0 };
+    }
+    return window.__cedHistoryCleaner?.getStats?.()
+      || { ok: false, message: 'History Cleaner 未初始化', rounds: 0, messages: 0 };
+  }
+
+  function trimHistoryCleaner(keepRounds) {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) {
+      return { ok: false, message: '当前站点暂不支持 History Cleaner', rounds: 0, messages: 0 };
+    }
+    const nextKeepRounds = normalizeHistoryCleanerKeepRounds(
+      keepRounds ?? state.historyCleanerKeepRounds
+    );
+    const result = window.__cedHistoryCleaner?.trim?.(nextKeepRounds, { autoMaintain: false })
+      || { ok: false, message: 'History Cleaner 未初始化', rounds: 0, messages: 0 };
+    return result;
+  }
+
+  function muteConversationObserverFor(durationMs = 520) {
+    const now = Date.now();
+    const nextUntil = now + Math.max(80, durationMs);
+    state.historyCleanerObserverMuteUntil = Math.max(state.historyCleanerObserverMuteUntil || 0, nextUntil);
+    state.observerImpactFlags.conversation = false;
+    state.observerImpactFlags.meta = false;
+    if (state.observerFlushTimer) {
+      clearTimeout(state.observerFlushTimer);
+      state.observerFlushTimer = null;
+    }
+  }
+
+  function getConversationObserveTarget() {
+    return queryFirst(SCROLL_CONTAINER_SELECTORS)
+      || queryFirst(CONVERSATION_ROOT_SELECTORS)
+      || document.querySelector('main')
+      || document.body;
+  }
+
+  function applySettingsPatch(patch, options = {}) {
     if (!patch || typeof patch !== 'object') return;
+    const shouldPersist = options.persist !== false;
 
     let formatChanged = false;
     let fileNameChanged = false;
@@ -1674,7 +2402,9 @@
       const nextFormat = normalizeExportFormat(patch[STORAGE_KEYS.format]);
       if (nextFormat !== state.selectedFormat) {
         state.selectedFormat = nextFormat;
-        persist(STORAGE_KEYS.format, state.selectedFormat);
+        if (shouldPersist) {
+          persist(STORAGE_KEYS.format, state.selectedFormat);
+        }
         formatChanged = true;
       }
     }
@@ -1683,7 +2413,9 @@
       const nextName = String(patch[STORAGE_KEYS.fileName] || '').trim();
       if (nextName !== state.fileName) {
         state.fileName = nextName;
-        persist(STORAGE_KEYS.fileName, state.fileName);
+        if (shouldPersist) {
+          persist(STORAGE_KEYS.fileName, state.fileName);
+        }
         fileNameChanged = true;
       }
     }
@@ -1692,7 +2424,9 @@
       const nextDock = patch[STORAGE_KEYS.dock] === 'left' ? 'left' : 'right';
       if (nextDock !== state.panelSide) {
         state.panelSide = nextDock;
-        persist(STORAGE_KEYS.dock, state.panelSide);
+        if (shouldPersist) {
+          persist(STORAGE_KEYS.dock, state.panelSide);
+        }
         dockChanged = true;
       }
     }
@@ -1701,52 +2435,106 @@
       const nextFormulaFormat = normalizeFormulaCopyFormat(patch[STORAGE_KEYS.formulaCopyFormat]);
       if (nextFormulaFormat !== state.formulaCopyFormat) {
         state.formulaCopyFormat = nextFormulaFormat;
-        persist(STORAGE_KEYS.formulaCopyFormat, state.formulaCopyFormat);
+        if (shouldPersist) {
+          persist(STORAGE_KEYS.formulaCopyFormat, state.formulaCopyFormat);
+        }
         formulaFormatChanged = true;
-        syncFormulaCopyFeatureConfig();
       }
+      syncFormulaCopyFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.timelineEnabled)) {
       state.timelineEnabled = normalizeTimelineEnabled(patch[STORAGE_KEYS.timelineEnabled]);
-      persist(STORAGE_KEYS.timelineEnabled, state.timelineEnabled);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.timelineEnabled, state.timelineEnabled);
+      }
+      syncTimelineFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.timelineScrollMode)) {
+      state.timelineScrollMode = normalizeTimelineScrollMode(patch[STORAGE_KEYS.timelineScrollMode]);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.timelineScrollMode, state.timelineScrollMode);
+      }
       syncTimelineFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.titleUpdaterEnabled)) {
       state.titleUpdaterEnabled = normalizeTitleUpdaterEnabled(patch[STORAGE_KEYS.titleUpdaterEnabled]);
-      persist(STORAGE_KEYS.titleUpdaterEnabled, state.titleUpdaterEnabled);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.titleUpdaterEnabled, state.titleUpdaterEnabled);
+      }
       syncTitleUpdaterFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.titleUpdaterIncludeFolder)) {
       state.titleUpdaterIncludeFolder = normalizeTitleUpdaterIncludeFolder(patch[STORAGE_KEYS.titleUpdaterIncludeFolder]);
-      persist(STORAGE_KEYS.titleUpdaterIncludeFolder, state.titleUpdaterIncludeFolder);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.titleUpdaterIncludeFolder, state.titleUpdaterIncludeFolder);
+      }
       syncTitleUpdaterFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.sidebarAutoHideEnabled)) {
       state.sidebarAutoHideEnabled = normalizeSidebarAutoHideEnabled(patch[STORAGE_KEYS.sidebarAutoHideEnabled]);
-      persist(STORAGE_KEYS.sidebarAutoHideEnabled, state.sidebarAutoHideEnabled);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.sidebarAutoHideEnabled, state.sidebarAutoHideEnabled);
+      }
       syncSidebarAutoHideFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.folderSpacing)) {
       state.folderSpacing = normalizeFolderSpacing(patch[STORAGE_KEYS.folderSpacing]);
-      persist(STORAGE_KEYS.folderSpacing, state.folderSpacing);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.folderSpacing, state.folderSpacing);
+      }
       syncFolderSpacingFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.markdownPatcherEnabled)) {
       state.markdownPatcherEnabled = normalizeMarkdownPatcherEnabled(patch[STORAGE_KEYS.markdownPatcherEnabled]);
-      persist(STORAGE_KEYS.markdownPatcherEnabled, state.markdownPatcherEnabled);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.markdownPatcherEnabled, state.markdownPatcherEnabled);
+      }
       syncMarkdownPatcherFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.snowEffectEnabled)) {
       state.snowEffectEnabled = normalizeSnowEffectEnabled(patch[STORAGE_KEYS.snowEffectEnabled]);
-      persist(STORAGE_KEYS.snowEffectEnabled, state.snowEffectEnabled);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.snowEffectEnabled, state.snowEffectEnabled);
+      }
       syncSnowEffectFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.historyCleanerKeepRounds)) {
+      state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(patch[STORAGE_KEYS.historyCleanerKeepRounds]);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.historyCleanerKeepRounds, state.historyCleanerKeepRounds);
+      }
+      syncHistoryCleanerFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.historyCleanerAutoMaintain)) {
+      state.historyCleanerAutoMaintain = normalizeHistoryCleanerAutoMaintain(patch[STORAGE_KEYS.historyCleanerAutoMaintain]);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.historyCleanerAutoMaintain, state.historyCleanerAutoMaintain);
+      }
+      syncHistoryCleanerFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.contextSyncEnabled)) {
+      state.contextSyncEnabled = normalizeContextSyncEnabled(patch[STORAGE_KEYS.contextSyncEnabled]);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.contextSyncEnabled, state.contextSyncEnabled);
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.contextSyncPort)) {
+      state.contextSyncPort = normalizeContextSyncPort(patch[STORAGE_KEYS.contextSyncPort]);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.contextSyncPort, state.contextSyncPort);
+      }
     }
 
     if (dockChanged && state.panelEl) {
@@ -1933,6 +2721,8 @@
         card.querySelector('input').addEventListener('change', (e) => {
           if (e.target.checked) state.selectedTurnIds.add(turn.id);
           else state.selectedTurnIds.delete(turn.id);
+          refreshPanelOverview();
+          refreshActionSection();
         });
       }
 
@@ -1951,6 +2741,9 @@
       const previewHtml = escapeHtml(turn.preview);
       if (previewEl.innerHTML !== previewHtml) previewEl.innerHTML = previewHtml;
     });
+
+    refreshPanelOverview();
+    refreshActionSection();
   }
 
   function formatRole(role) {
@@ -1964,14 +2757,197 @@
     updateTurnList();
   }
 
+  function refreshPanelOverview() {
+    const panel = state.panelEl;
+    if (!panel) return;
+    const titleEl = panel.querySelector('[data-ced-overview="title"]');
+    const selectionEl = panel.querySelector('[data-ced-overview="selection"]');
+    const formatEl = panel.querySelector('[data-ced-overview="format"]');
+    const fileNameEl = panel.querySelector('[data-ced-overview="filename"]');
+    const title = state.pageTitle || ACTIVE_SITE.defaultTitle || '当前会话';
+    const selectedCount = state.selectedTurnIds.size;
+    const totalCount = state.turns.length;
+    const format = getExportFormatLabel(state.selectedFormat);
+    const fileName = state.fileName || '自动使用会话标题';
+
+    if (titleEl instanceof HTMLElement) {
+      titleEl.textContent = title;
+      titleEl.title = title;
+    }
+    if (selectionEl instanceof HTMLElement) {
+      selectionEl.textContent = `${selectedCount} / ${totalCount || 0}`;
+    }
+    if (formatEl instanceof HTMLElement) {
+      formatEl.textContent = format;
+    }
+    if (fileNameEl instanceof HTMLElement) {
+      fileNameEl.textContent = fileName;
+      fileNameEl.title = fileName;
+    }
+  }
+
+  function refreshActionSection() {
+    const panel = state.panelEl;
+    if (!panel) return;
+    const selectButton = panel.querySelector('[data-ced-action="select-all"]');
+    const exportButton = panel.querySelector('[data-ced-action="export"]');
+    const allSelected = state.turns.length > 0 && state.selectedTurnIds.size === state.turns.length;
+    const selectedCount = state.selectedTurnIds.size;
+
+    if (selectButton instanceof HTMLButtonElement) {
+      selectButton.textContent = allSelected ? '取消全选' : '全选全部';
+    }
+    if (exportButton instanceof HTMLButtonElement) {
+      exportButton.textContent = selectedCount > 0
+        ? `导出选中内容 (${selectedCount})`
+        : '导出选中内容';
+    }
+  }
+
+  function getExportFormatLabel(formatId) {
+    const format = EXPORT_FORMATS.find((item) => item.id === formatId);
+    return format ? format.label : String(formatId || 'Text');
+  }
+
+  function isCedUiElement(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    if (node.classList) {
+      for (const cls of node.classList) {
+        if (cls && cls.startsWith('ced-')) {
+          return true;
+        }
+      }
+    }
+    return !!node.closest(
+      '.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-launcher, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas, .ced-folder-sidebar, .ced-archive-placeholder'
+    );
+  }
+
+  function elementMayAffectConversation(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (isCedUiElement(element)) return false;
+
+    if (element.matches(SELECTORS.MESSAGE_TURN)) return true;
+    if (element.matches('[data-message-author-role], [data-author-role], [data-role]')) return true;
+
+    const tag = element.tagName.toLowerCase();
+    if (tag === 'article' || tag === 'user-query' || tag === 'model-response') return true;
+
+    const testId = (element.getAttribute('data-testid') || '').toLowerCase();
+    if (testId && /(conversation-turn|conversation|message|chat-history|chat-message)/.test(testId)) {
+      return true;
+    }
+
+    if (element.childElementCount > 0 && element.childElementCount <= 42) {
+      try {
+        if (element.querySelector(SELECTORS.MESSAGE_TURN)) {
+          return true;
+        }
+      } catch (_error) {
+        // noop
+      }
+    }
+    return false;
+  }
+
+  function elementMayAffectMeta(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (isCedUiElement(element)) return false;
+
+    if (element.matches('a[href*="/c/"], [data-testid*="title"], [class*="sidebar"], [class*="history"]')) {
+      return true;
+    }
+
+    const idHint = `${element.id || ''} ${element.className || ''}`.toLowerCase();
+    if (/(sidebar|history|conversation-title|chat-title)/.test(idHint)) {
+      return true;
+    }
+
+    if (element.childElementCount > 0 && element.childElementCount <= 42) {
+      if (element.querySelector('a[href*="/c/"], [data-testid*="title"]')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function classifyConversationMutations(records) {
+    const impact = { conversation: false, meta: false };
+    if (!Array.isArray(records) || !records.length) return impact;
+
+    const visited = new Set();
+    for (const record of records) {
+      if (!record) continue;
+      const candidates = [];
+      if (record.target instanceof HTMLElement) {
+        candidates.push(record.target);
+      }
+      record.addedNodes?.forEach((node) => {
+        if (node instanceof HTMLElement) candidates.push(node);
+      });
+      record.removedNodes?.forEach((node) => {
+        if (node instanceof HTMLElement) candidates.push(node);
+      });
+
+      for (const element of candidates) {
+        if (visited.has(element)) continue;
+        visited.add(element);
+
+        if (!impact.conversation && elementMayAffectConversation(element)) {
+          impact.conversation = true;
+        }
+        if (!impact.meta && elementMayAffectMeta(element)) {
+          impact.meta = true;
+        }
+        if (impact.conversation && impact.meta) {
+          return impact;
+        }
+      }
+    }
+    return impact;
+  }
+
   function observeConversation() {
     if (state.observer) state.observer.disconnect();
-    state.observer = new MutationObserver(() => {
-      scheduleTimelineRefresh();
-      clearTimeout(state.refreshTimer);
-      state.refreshTimer = setTimeout(refreshConversationData, 800);
+    if (state.observerFlushTimer) {
+      clearTimeout(state.observerFlushTimer);
+      state.observerFlushTimer = null;
+    }
+    state.observerImpactFlags.conversation = false;
+    state.observerImpactFlags.meta = false;
+    state.observer = new MutationObserver((records) => {
+      if (Date.now() < (state.historyCleanerObserverMuteUntil || 0)) {
+        return;
+      }
+      const impact = classifyConversationMutations(records);
+      if (!impact.conversation && !impact.meta) return;
+
+      state.observerImpactFlags.conversation = state.observerImpactFlags.conversation || impact.conversation;
+      state.observerImpactFlags.meta = state.observerImpactFlags.meta || impact.meta;
+
+      if (state.observerFlushTimer) return;
+      const delay = document.hidden ? 420 : 140;
+      state.observerFlushTimer = setTimeout(() => {
+        state.observerFlushTimer = null;
+        const conversationChanged = state.observerImpactFlags.conversation;
+        const metaChanged = state.observerImpactFlags.meta;
+        state.observerImpactFlags.conversation = false;
+        state.observerImpactFlags.meta = false;
+
+        if (conversationChanged) {
+          state.timelineTurnsCache.signature = '';
+          scheduleTimelineEnsure(280);
+          scheduleTimelineRefresh();
+          if (shouldRunHeavyRefresh()) {
+            scheduleHeavyRefresh(760);
+          }
+        }
+        if (conversationChanged || metaChanged) {
+          scheduleMetaRefresh(260);
+        }
+      }, delay);
     });
-    const target = queryFirst(SCROLL_CONTAINER_SELECTORS) || queryFirst(CONVERSATION_ROOT_SELECTORS) || document.querySelector('main') || document.body;
+    const target = getConversationObserveTarget();
     state.observer.observe(target, { childList: true, subtree: true });
   }
 
@@ -2188,7 +3164,7 @@
 
         controls.forEach((control) => {
           if (!(control instanceof HTMLElement)) return;
-          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) return;
+          if (control.closest('.ced-panel, .ced-floating-button, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-launcher, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas, .ced-archive-placeholder')) return;
           if (control.matches('[aria-expanded="true"]')) return;
           if (control instanceof HTMLButtonElement && control.disabled) return;
           if (isClaudeActionBarControl(control)) return;
@@ -2222,6 +3198,7 @@
 
   async function exportSelection() {
     if (state.exporting) return;
+    await refreshConversationData();
     let selection = state.turns.filter((t) => state.selectedTurnIds.has(t.id));
     if (!selection.length) return showToast('请至少选择一条消息');
 
@@ -2610,7 +3587,7 @@
     const addIfSafe = (node) => {
       if (!(node instanceof HTMLElement)) return;
       if (node === root) return;
-      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas')) {
+      if (node.matches('.ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-launcher, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas, .ced-archive-placeholder')) {
         removable.add(node);
         return;
       }
@@ -2658,7 +3635,7 @@
     const sourceTurnMap = new Map(turns.map((turn) => [turn.id, turn.node]));
     const clonedRoot = sourceRoot.cloneNode(true);
 
-    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-panel', '.ced-timeline-preview-export', '.ced-timeline-export-quick', '.ced-timeline-context-menu', '.ced-snow-effect-canvas'].forEach((selector) => {
+    ['.ced-floating-button', '.ced-panel', '.ced-toast', '.ced-formula-copy-toast', '.ced-timeline-bar', '.ced-timeline-tooltip', '.ced-timeline-preview-toggle', '.ced-timeline-preview-launcher', '.ced-timeline-preview-panel', '.ced-timeline-preview-export', '.ced-timeline-export-quick', '.ced-timeline-context-menu', '.ced-snow-effect-canvas', '.ced-archive-placeholder'].forEach((selector) => {
       clonedRoot.querySelectorAll(selector).forEach((el) => el.remove());
     });
     clonedRoot.querySelectorAll('.ced-formula-node').forEach((el) => {
@@ -2714,7 +3691,7 @@
 <base href="${escapeHtml(location.origin + '/')}">
 ${headClone.innerHTML}
 <style>
-  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas {
+  .ced-floating-button, .ced-panel, .ced-toast, .ced-formula-copy-toast, .ced-formula-copy-btn, .ced-timeline-bar, .ced-timeline-tooltip, .ced-timeline-preview-toggle, .ced-timeline-preview-launcher, .ced-timeline-preview-panel, .ced-timeline-preview-export, .ced-timeline-export-quick, .ced-timeline-context-menu, .ced-snow-effect-canvas, .ced-archive-placeholder {
     display: none !important;
   }
   [data-testid*="composer"],
