@@ -9,12 +9,12 @@
 - [x] 改造 `scripts/build-crx.sh`，去掉 `rm -rf` 依赖，改为基于临时目录的安全打包流程。
 - [x] 收敛 `README.md`，明确 ChatGPT-first、VSCode Bridge、本地同步和打包/安装方式。
 - [x] 运行静态校验与正式打包。
-- [ ] 提交并推送到 `origin/main`。
+- [x] 提交并推送到 `origin/main`。
 
 ## Iteration 46 Acceptance
 - [x] `./scripts/build-crx.sh` 可直接运行，生成最新 zip/crx 产物。
 - [x] README 与当前实现一致，不再保留过时的信息架构或模糊文案。
-- [ ] 改动完成后已提交并推送到 GitHub。
+- [x] 改动完成后已提交并推送到 GitHub。
 
 ## Iteration 46 Review
 - `scripts/build-crx.sh`
@@ -31,6 +31,7 @@
   - `node --check src/content-script.js`
   - `node --check integrations/vscode-threadatlas/extension.js`
   - `./scripts/build-crx.sh`
+  - `git push origin main`
 
 ## Iteration 45 Goal
 - 把现有“手动把网页会话 POST 到 localhost”的简陋 context sync，升级成可实际连接 VSCode 的本地桥接能力。
