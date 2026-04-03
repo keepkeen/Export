@@ -48,6 +48,12 @@
       "js": [
         "vendor/html2canvas-pro.min.js",
         "vendor/jspdf.umd.min.js",
+        "src/runtime-scheduler.js",
+        "src/conversation-kernel.js",
+        "src/history-window-manager.js",
+        "src/history-archive-controller.js",
+        "src/chatgpt-conversation-parser.js",
+        "src/export-engine.js",
         "src/formula-copy-feature.js",
         "src/timeline-feature.js",
         "src/folder-feature.js",

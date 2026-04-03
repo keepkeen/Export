@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>ThreadAtlas Settings</title>
+    <title>ThreadAtlas 设置</title>
     <link rel="stylesheet" href="options.css">
   </head>
   <body class="options-page">
@@ -11,8 +11,8 @@
       <section class="popup__top">
         <header class="popup__header">
           <div>
-            <p class="popup__eyebrow">Thread Workspace</p>
-            <h1 class="popup__title">ThreadAtlas</h1>
+            <p class="popup__eyebrow">扩展设置</p>
+            <h1 class="popup__title">ThreadAtlas 设置</h1>
             <p class="popup__hint" id="popup-tab-hint">当前页：检测中...</p>
           </div>
           <span class="popup-badge popup-badge--soft" id="popup-site-badge">检测中</span>
@@ -20,10 +20,10 @@
 
         <section class="popup__hero">
           <div class="popup__hero-badges">
-            <span class="popup-badge popup-badge--accent">完整设置页</span>
+            <span class="popup-badge popup-badge--accent">当前页面状态</span>
             <span class="popup-badge popup-badge--soft" id="popup-live-badge">等待连接</span>
           </div>
-          <h2 class="popup__hero-title">全量设置与状态中心</h2>
+          <h2 class="popup__hero-title">完整设置与运行状态</h2>
           <p class="popup__hero-desc" id="popup-summary">正在分析当前页面状态与可用能力。</p>
           <div class="popup__hero-stats">
             <div class="popup-stat">
@@ -45,13 +45,13 @@
       <section class="popup__grid">
         <section class="popup__section popup__section--experience">
           <div class="section-head">
-            <h2 class="section-title">实时体验</h2>
-            <p class="section-desc">高频可见设置。修改后会立即推送到已打开的聊天页面。</p>
+            <h2 class="section-title">阅读与导航</h2>
+            <p class="section-desc">影响当前聊天页面阅读体验的高频设置，修改后会立即推送到已打开页面。</p>
           </div>
           <div class="popup__controls popup__controls--experience">
             <label class="field field--span-2">
               <span class="field__label">公式复制格式</span>
-              <span class="field__hint">点击公式即可复制，适合不同编辑器和文档场景。</span>
+              <span class="field__hint">点击公式即可复制，按你的文档场景选择输出格式。</span>
               <select id="setting-formula-format"></select>
             </label>
             <label class="toggle-field">
@@ -70,14 +70,14 @@
               <input id="setting-title-updater-enabled" type="checkbox">
               <span class="toggle-field__meta">
                 <span class="toggle-field__title">标签标题同步</span>
-                <span class="toggle-field__hint">让浏览器标签页跟随当前会话标题。</span>
+                <span class="toggle-field__hint">浏览器标签页跟随当前会话标题。</span>
               </span>
             </label>
             <label class="toggle-field">
               <input id="setting-title-updater-include-folder" type="checkbox">
               <span class="toggle-field__meta">
                 <span class="toggle-field__title">标题包含文件夹前缀</span>
-                <span class="toggle-field__hint">在多项目并行时更容易识别标签页。</span>
+                <span class="toggle-field__hint">多项目并行时更容易分辨标签页。</span>
               </span>
             </label>
             <label class="toggle-field">
@@ -97,8 +97,8 @@
             <label class="toggle-field">
               <input id="setting-snow-effect-enabled" type="checkbox">
               <span class="toggle-field__meta">
-                <span class="toggle-field__title">Snow Effect</span>
-                <span class="toggle-field__hint">默认开启的轻量装饰效果，可随时关闭。</span>
+                <span class="toggle-field__title">雪花动效</span>
+                <span class="toggle-field__hint">装饰效果，默认关闭，需要时再开启。</span>
               </span>
             </label>
           </div>
@@ -108,7 +108,7 @@
           <section class="popup__section popup__section--cleanup">
             <div class="section-head">
               <h2 class="section-title">页面整理</h2>
-              <p class="section-desc">用于整理长会话和侧栏分组的结构设置。</p>
+              <p class="section-desc">用于整理长会话和侧栏结构，优先减少页面负担。</p>
             </div>
             <div class="popup__controls popup__controls--cleanup">
               <label class="field field--span-2">
@@ -119,26 +119,31 @@
                   <span id="setting-folder-spacing-value">2px</span>
                 </div>
               </label>
+              <label class="field field--span-2">
+                <span class="field__label">渲染导出范围</span>
+                <span class="field__hint">截图 / PDF / HTML / Word 默认导出当前 live window；完整会话会更慢。</span>
+                <select id="setting-export-render-scope"></select>
+              </label>
               <div class="subsection-card field--span-2">
                 <div class="subsection-card__head">
-                  <h3 class="subsection-card__title">History Cleaner</h3>
+                  <h3 class="subsection-card__title">历史裁剪</h3>
                   <p class="subsection-card__desc">只保留最近 N 轮对话，适合超长会话阅读与性能控制。</p>
                 </div>
                 <label class="field">
                   <span class="field__label">保留最近轮数</span>
-                  <span class="field__hint">仅影响当前页面显示，刷新页面可恢复完整对话。</span>
+                  <span class="field__hint">只影响当前页面显示，刷新页面后会重新从宿主页面构建会话。</span>
                   <input id="setting-history-cleaner-keep-rounds" type="number" min="1" max="100" step="1">
                 </label>
                 <label class="toggle-field">
                   <input id="setting-history-cleaner-auto-maintain" type="checkbox">
                   <span class="toggle-field__meta">
                     <span class="toggle-field__title">自动维持最近 N 轮</span>
-                    <span class="toggle-field__hint">适合持续聊天时自动清理过旧内容。</span>
+                    <span class="toggle-field__hint">持续聊天时自动裁掉更早的 DOM，保持页面轻量。</span>
                   </span>
                 </label>
                 <div class="action-row">
                   <button id="history-cleaner-check" class="secondary-button" type="button">查看当前轮数</button>
-                  <button id="history-cleaner-trim" class="sync-button" type="button">裁剪旧对话</button>
+                  <button id="history-cleaner-trim" class="sync-button" type="button">立即裁剪</button>
                 </div>
               </div>
             </div>
@@ -146,8 +151,8 @@
 
           <section class="popup__section popup__section--sync">
             <div class="section-head">
-              <h2 class="section-title">本地联动</h2>
-              <p class="section-desc">与本地服务协同工作。适合上下文同步和外部工具接入。</p>
+              <h2 class="section-title">本地同步</h2>
+              <p class="section-desc">当你需要把当前会话发送给本地服务时再启用。</p>
             </div>
             <div class="popup__controls popup__controls--sync">
               <label class="toggle-field toggle-field--span-2">
@@ -166,7 +171,36 @@
                 <span id="context-sync-online" class="sync-pill is-offline">离线</span>
                 <button id="context-sync-push" class="sync-button" type="button">同步当前会话</button>
               </div>
-              <p class="popup__note">当当前页不是受支持的聊天站点时，设置仍会保存，但动作按钮不会执行。</p>
+              <p class="popup__note">当前页不是受支持站点时，设置仍会保存，但动作按钮不会执行。</p>
+            </div>
+          </section>
+
+          <section class="popup__section popup__section--diagnostics" id="options-diagnostics">
+            <div class="section-head">
+              <h2 class="section-title">诊断</h2>
+              <p class="section-desc">只在设置页展示，用于排查 DOM 识别、归档窗口和存储写入问题。</p>
+            </div>
+            <div class="diagnostic-grid">
+              <div class="diagnostic-card">
+                <span class="diagnostic-card__label">站点 / 模式</span>
+                <strong class="diagnostic-card__value" id="diagnostics-site-key">-</strong>
+              </div>
+              <div class="diagnostic-card">
+                <span class="diagnostic-card__label">Selector 命中</span>
+                <strong class="diagnostic-card__value" id="diagnostics-selector">-</strong>
+              </div>
+              <div class="diagnostic-card">
+                <span class="diagnostic-card__label">轮次窗口</span>
+                <strong class="diagnostic-card__value" id="diagnostics-rounds">-</strong>
+              </div>
+              <div class="diagnostic-card">
+                <span class="diagnostic-card__label">最近刷新耗时</span>
+                <strong class="diagnostic-card__value" id="diagnostics-refresh">-</strong>
+              </div>
+              <div class="diagnostic-card diagnostic-card--wide">
+                <span class="diagnostic-card__label">最近一次存储错误</span>
+                <strong class="diagnostic-card__value" id="diagnostics-storage">-</strong>
+              </div>
             </div>
           </section>
         </div>

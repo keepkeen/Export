@@ -19,8 +19,6 @@
       };
       this.originalTitle = '';
       this.locationHref = '';
-      this.locationTimer = null;
-      this.syncTimer = null;
       this.historyPatched = false;
       this.originalPushState = null;
       this.originalReplaceState = null;
@@ -40,7 +38,6 @@
         this.locationHref = location.href;
         this.patchHistory();
         window.addEventListener('popstate', this.handlePopState, { passive: true });
-        this.startSyncTimer();
       }
 
       this.refreshFromProvider();
@@ -48,7 +45,6 @@
     }
 
     destroy() {
-      this.stopSyncTimer();
       window.removeEventListener('popstate', this.handlePopState);
       this.restoreHistory();
       this.initialized = false;
@@ -165,27 +161,14 @@
     handleRouteChange() {
       if (location.href === this.locationHref) return;
       this.locationHref = location.href;
+      window.dispatchEvent(new CustomEvent('ced-route-change', {
+        detail: {
+          href: this.locationHref,
+        },
+      }));
       this.refresh();
     }
 
-    startSyncTimer() {
-      this.stopSyncTimer();
-      this.syncTimer = setInterval(() => {
-        this.handleRouteChange();
-        this.refresh();
-      }, 1200);
-    }
-
-    stopSyncTimer() {
-      if (this.syncTimer) {
-        clearInterval(this.syncTimer);
-        this.syncTimer = null;
-      }
-      if (this.locationTimer) {
-        clearInterval(this.locationTimer);
-        this.locationTimer = null;
-      }
-    }
   }
 
   const feature = new TitleUpdaterFeature();

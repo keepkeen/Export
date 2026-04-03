@@ -8,7 +8,6 @@
     enabled: false,
     leaveDelayMs: 520,
     enterDelayMs: 260,
-    rebindIntervalMs: 1000,
     hotZonePx: 14,
   };
 
@@ -19,6 +18,28 @@
     '.ced-timeline-preview-panel',
     '.ced-timeline-context-menu',
     '.ced-folder-section',
+  ].join(', ');
+  const SIDEBAR_MUTATION_SELECTOR = [
+    'aside',
+    'nav',
+    '[data-testid*="sidebar"]',
+    '[class*="sidebar"]',
+    'button[data-testid*="sidebar"]',
+    'button[aria-label*="sidebar"]',
+    'a[href*="/c/"]',
+  ].join(', ');
+  const COMPOSER_IGNORE_SELECTOR = [
+    'textarea',
+    '[role="textbox"]',
+    '[contenteditable="true"]',
+    '[data-testid*="composer"]',
+    '[data-testid*="chat-input"]',
+    '[data-testid*="message-input"]',
+    '[class*="composer"]',
+    '[class*="chat-input"]',
+    '[class*="prompt-textarea"]',
+    'form',
+    'footer',
   ].join(', ');
 
   function isElementVisible(element) {
@@ -42,10 +63,10 @@
       this.enabled = false;
       this.sidebarElement = null;
       this.mutationObserver = null;
-      this.rebindTimer = null;
       this.leaveTimer = null;
       this.enterTimer = null;
       this.resizeTimer = null;
+      this.mutationFlushRaf = null;
       this.autoCollapsed = false;
       this.pausedUntil = 0;
       this.lastMouseX = 0;
@@ -122,18 +143,12 @@
 
     startObservers() {
       if (!this.mutationObserver && document.body) {
-        this.mutationObserver = new MutationObserver(() => {
+        this.mutationObserver = new MutationObserver((records) => {
           if (!this.enabled) return;
-          this.rebindSidebarElement();
+          if (!this.mutationMayAffectSidebar(records)) return;
+          this.scheduleSidebarRebind();
         });
         this.mutationObserver.observe(document.body, { childList: true, subtree: true });
-      }
-
-      if (!this.rebindTimer) {
-        this.rebindTimer = setInterval(() => {
-          if (!this.enabled) return;
-          this.rebindSidebarElement();
-        }, this.options.rebindIntervalMs);
       }
     }
 
@@ -142,9 +157,9 @@
         this.mutationObserver.disconnect();
         this.mutationObserver = null;
       }
-      if (this.rebindTimer) {
-        clearInterval(this.rebindTimer);
-        this.rebindTimer = null;
+      if (this.mutationFlushRaf) {
+        cancelAnimationFrame(this.mutationFlushRaf);
+        this.mutationFlushRaf = null;
       }
     }
 
@@ -161,6 +176,54 @@
         clearTimeout(this.resizeTimer);
         this.resizeTimer = null;
       }
+      if (this.mutationFlushRaf) {
+        cancelAnimationFrame(this.mutationFlushRaf);
+        this.mutationFlushRaf = null;
+      }
+    }
+
+    isComposerOrInputNode(node) {
+      if (!(node instanceof HTMLElement)) return false;
+      return node.matches(COMPOSER_IGNORE_SELECTOR) || !!node.closest(COMPOSER_IGNORE_SELECTOR);
+    }
+
+    mutationMayAffectSidebar(records) {
+      if (!Array.isArray(records) || !records.length) return false;
+      for (const record of records) {
+        if (!record) continue;
+        if (record.target instanceof HTMLElement && this.isComposerOrInputNode(record.target)) {
+          continue;
+        }
+
+        const candidates = [];
+        if (record.target instanceof HTMLElement) {
+          candidates.push(record.target);
+        }
+        record.addedNodes?.forEach((node) => {
+          if (node instanceof HTMLElement) candidates.push(node);
+        });
+        record.removedNodes?.forEach((node) => {
+          if (node instanceof HTMLElement) candidates.push(node);
+        });
+
+        for (const node of candidates) {
+          if (!(node instanceof HTMLElement)) continue;
+          if (this.isComposerOrInputNode(node)) continue;
+          if (node.closest('.ced-panel, .ced-timeline-bar, .ced-folder-sidebar')) continue;
+          if (node.matches(SIDEBAR_MUTATION_SELECTOR)) return true;
+          if (node.querySelector?.(SIDEBAR_MUTATION_SELECTOR)) return true;
+        }
+      }
+      return false;
+    }
+
+    scheduleSidebarRebind() {
+      if (this.mutationFlushRaf) return;
+      this.mutationFlushRaf = requestAnimationFrame(() => {
+        this.mutationFlushRaf = null;
+        if (!this.enabled) return;
+        this.rebindSidebarElement();
+      });
     }
 
     resolveSidebarElement() {

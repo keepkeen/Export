@@ -160,11 +160,6 @@
   class MarkdownPatcherFeature {
     constructor() {
       this.enabled = true;
-      this.observer = null;
-      this.flushRaf = null;
-      this.pendingNodes = new Set();
-      this.handleMutations = this.handleMutations.bind(this);
-      this.flushPending = this.flushPending.bind(this);
     }
 
     initialize(options = {}) {
@@ -187,72 +182,20 @@
 
     enable() {
       if (!this.enabled) return;
-      this.patchInitial();
-      this.observe();
+      this.refresh(document);
     }
 
     disable() {
-      if (this.observer) {
-        this.observer.disconnect();
-        this.observer = null;
-      }
-      if (this.flushRaf) {
-        cancelAnimationFrame(this.flushRaf);
-        this.flushRaf = null;
-      }
-      this.pendingNodes.clear();
     }
 
     destroy() {
       this.disable();
     }
 
-    patchInitial() {
-      const roots = Array.from(document.querySelectorAll(TARGET_SELECTOR)).filter((node) => isElementNode(node));
+    refresh(root = document) {
+      if (!this.enabled || !root?.querySelectorAll) return;
+      const roots = Array.from(root.querySelectorAll(TARGET_SELECTOR)).filter((node) => isElementNode(node));
       roots.forEach((root) => fixBrokenBoldTags(root));
-    }
-
-    observe() {
-      if (this.observer || !document.body) return;
-      this.observer = new MutationObserver(this.handleMutations);
-      this.observer.observe(document.body, { childList: true, subtree: true });
-    }
-
-    handleMutations(mutations) {
-      if (!this.enabled) return;
-
-      mutations.forEach((mutation) => {
-        mutation.addedNodes.forEach((node) => {
-          if (!(node instanceof HTMLElement)) return;
-          if (node.closest(EXCLUDE_SELECTOR)) return;
-
-          if (node.matches(TARGET_SELECTOR)) {
-            this.pendingNodes.add(node);
-          }
-
-          node.querySelectorAll?.(TARGET_SELECTOR)?.forEach((child) => {
-            if (child instanceof HTMLElement) {
-              this.pendingNodes.add(child);
-            }
-          });
-        });
-      });
-
-      if (this.pendingNodes.size && !this.flushRaf) {
-        this.flushRaf = requestAnimationFrame(this.flushPending);
-      }
-    }
-
-    flushPending() {
-      this.flushRaf = null;
-      if (!this.pendingNodes.size) return;
-      const nodes = Array.from(this.pendingNodes);
-      this.pendingNodes.clear();
-      nodes.forEach((node) => {
-        if (node.isConnected) {
-          fixBrokenBoldTags(node);
-        }
-      });
     }
   }
 
@@ -261,6 +204,7 @@
   window.__cedMarkdownPatcher = {
     initialize: (options) => feature.initialize(options),
     setEnabled: (enabled) => feature.setEnabled(enabled),
+    refresh: (root) => feature.refresh(root),
     destroy: () => feature.destroy(),
     fixBrokenBoldTags,
   };

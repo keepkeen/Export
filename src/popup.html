@@ -7,110 +7,115 @@
     <link rel="stylesheet" href="popup.css">
   </head>
   <body class="popup-page">
-    <main class="mini-popup">
-      <header class="mini-hero">
-        <div class="mini-hero__top">
-          <div>
-            <p class="mini-hero__eyebrow">Thread Workspace</p>
-            <h1 class="mini-hero__title">ThreadAtlas</h1>
-          </div>
-          <button id="open-settings" class="mini-button mini-button--ghost" type="button">完整设置</button>
-        </div>
-        <div class="mini-hero__badges">
-          <span class="popup-badge popup-badge--soft" id="popup-site-badge">检测中</span>
-          <span class="popup-badge popup-badge--soft" id="popup-live-badge">等待连接</span>
-        </div>
-        <p class="mini-hero__hint" id="popup-tab-hint">当前页：检测中...</p>
-        <p class="mini-hero__summary" id="popup-summary">正在分析当前页面状态与可用能力。</p>
-        <div class="mini-stats">
-          <div class="mini-stat">
-            <span class="mini-stat__label">时间轴</span>
-            <strong class="mini-stat__value" id="popup-stat-timeline">-</strong>
-          </div>
-          <div class="mini-stat">
-            <span class="mini-stat__label">滚动模式</span>
-            <strong class="mini-stat__value" id="popup-stat-scroll-mode">-</strong>
-          </div>
-          <div class="mini-stat">
-            <span class="mini-stat__label">本地同步</span>
-            <strong class="mini-stat__value" id="popup-stat-sync">-</strong>
+    <main class="popup-shell">
+      <header class="popup-header">
+        <div class="popup-brand">
+          <span class="popup-brand__mark" aria-hidden="true"></span>
+          <div class="popup-brand__meta">
+            <h1 class="popup-brand__title">ThreadAtlas</h1>
+            <p class="popup-brand__hint" id="popup-tab-hint">当前页：检测中...</p>
           </div>
         </div>
+        <button id="open-settings" class="button button--ghost" type="button">完整设置</button>
       </header>
 
-      <section class="mini-card">
-        <div class="mini-section-head">
-          <h2>快速控制</h2>
-          <p>浏览器 popup 只放高频项，避免被尺寸限制挤坏。</p>
+      <section class="panel panel--status">
+        <div class="panel__head panel__head--stacked">
+          <div>
+            <h2 class="panel__title">当前页面</h2>
+            <p class="panel__desc" id="popup-summary">正在分析当前页面状态与可用能力。</p>
+          </div>
+          <div class="badge-row">
+            <span class="popup-badge popup-badge--soft" id="popup-site-badge">检测中</span>
+            <span class="popup-badge popup-badge--soft" id="popup-live-badge">等待连接</span>
+          </div>
         </div>
-        <div class="mini-grid">
-          <label class="mini-toggle">
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span class="metric-card__label">时间轴</span>
+            <strong class="metric-card__value" id="popup-stat-timeline">-</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-card__label">滚动模式</span>
+            <strong class="metric-card__value" id="popup-stat-scroll-mode">-</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-card__label">本地同步</span>
+            <strong class="metric-card__value" id="popup-stat-sync">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h2 class="panel__title">快速设置</h2>
+            <p class="panel__desc">改完立即推送到当前聊天页面。</p>
+          </div>
+        </div>
+        <div class="control-grid">
+          <label class="setting setting--toggle">
+            <div class="setting__meta">
+              <span class="setting__label">启用时间轴</span>
+              <span class="setting__hint">控制右侧时间线显示</span>
+            </div>
             <input id="setting-timeline-enabled" type="checkbox">
-            <span class="mini-toggle__meta">
-              <span class="mini-toggle__title">启用时间轴</span>
-              <span class="mini-toggle__hint">当前页即时生效</span>
-            </span>
           </label>
-          <label class="mini-toggle">
+          <label class="setting setting--toggle">
+            <div class="setting__meta">
+              <span class="setting__label">自动归档</span>
+              <span class="setting__hint">默认仅保留最近 10 轮</span>
+            </div>
             <input id="setting-history-cleaner-auto-maintain" type="checkbox">
-            <span class="mini-toggle__meta">
-              <span class="mini-toggle__title">自动无感归档</span>
-              <span class="mini-toggle__hint">默认保留最近 10 轮</span>
-            </span>
           </label>
-          <label class="mini-field">
-            <span class="mini-field__label">公式复制格式</span>
+          <label class="setting setting--field">
+            <span class="setting__label">公式复制格式</span>
             <select id="setting-formula-format"></select>
           </label>
-          <label class="mini-field">
-            <span class="mini-field__label">时间线滚动模式</span>
+          <label class="setting setting--field">
+            <span class="setting__label">时间线滚动模式</span>
             <select id="setting-timeline-scroll-mode"></select>
           </label>
         </div>
       </section>
 
-      <section class="mini-card">
-        <div class="mini-section-head">
-          <h2>历史裁剪</h2>
-          <p>手动检查和立即裁剪，适合长会话临时整理。</p>
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h2 class="panel__title">页面动作</h2>
+            <p class="panel__desc">针对当前会话执行一次性检查、裁剪和同步。</p>
+          </div>
         </div>
-        <div class="mini-grid mini-grid--single">
-          <label class="mini-field">
-            <span class="mini-field__label">保留最近轮数</span>
+        <div class="action-stack">
+          <label class="setting setting--field setting--compact">
+            <span class="setting__label">保留最近轮数</span>
             <input id="setting-history-cleaner-keep-rounds" type="number" min="1" max="100" step="1">
           </label>
-          <div class="mini-actions">
-            <button id="history-cleaner-check" class="mini-button mini-button--ghost" type="button">查看轮数</button>
-            <button id="history-cleaner-trim" class="mini-button mini-button--primary" type="button">立即裁剪</button>
+          <div class="button-row">
+            <button id="history-cleaner-check" class="button button--ghost" type="button">查看轮数</button>
+            <button id="history-cleaner-trim" class="button button--primary" type="button">立即裁剪</button>
           </div>
-        </div>
-      </section>
-
-      <section class="mini-card">
-        <div class="mini-section-head">
-          <h2>本地同步</h2>
-          <p>需要本地服务时再启用。</p>
-        </div>
-        <div class="mini-grid">
-          <label class="mini-toggle mini-toggle--full">
+          <label class="setting setting--toggle setting--full">
+            <div class="setting__meta">
+              <span class="setting__label">启用本地同步</span>
+              <span class="setting__hint">连接 127.0.0.1 本地服务</span>
+            </div>
             <input id="setting-context-sync-enabled" type="checkbox">
-            <span class="mini-toggle__meta">
-              <span class="mini-toggle__title">启用本地同步</span>
-              <span class="mini-toggle__hint">连接 127.0.0.1 本地服务</span>
-            </span>
           </label>
-          <label class="mini-field">
-            <span class="mini-field__label">端口</span>
-            <input id="setting-context-sync-port" type="number" min="1" max="65535" step="1">
-          </label>
-          <div class="mini-sync">
-            <span id="context-sync-online" class="sync-pill is-offline">离线</span>
-            <button id="context-sync-push" class="mini-button mini-button--primary" type="button">同步当前会话</button>
+          <div class="sync-grid">
+            <label class="setting setting--field setting--compact">
+              <span class="setting__label">同步端口</span>
+              <input id="setting-context-sync-port" type="number" min="1" max="65535" step="1">
+            </label>
+            <div class="sync-box">
+              <span id="context-sync-online" class="sync-pill is-offline">离线</span>
+              <button id="context-sync-push" class="button button--primary" type="button">同步当前会话</button>
+            </div>
           </div>
         </div>
       </section>
 
-      <footer class="mini-footer" id="popup-status"></footer>
+      <footer class="popup-status" id="popup-status"></footer>
     </main>
     <script src="popup.js"></script>
   </body>

@@ -4,15 +4,35 @@
     return;
   }
 
-  const STORAGE_KEY = 'ced-folder-data-v1';
+  const STORAGE_KEYS = {
+    legacy: 'ced-folder-data-v1',
+    prefs: 'ced-folder-prefs-v2',
+    catalog: 'ced-folder-catalog-v2',
+    migrated: 'ced-folder-storage-migrated-v2',
+  };
   const MAX_CONVERSATIONS = 1200;
 
-  const DEFAULT_DATA = {
+  const DEFAULT_PREFS = {
     folders: [],
-    conversationFolders: {},
-    conversations: {},
     sortMode: 'updated-desc',
   };
+  const DEFAULT_CATALOG = {
+    conversationFolders: {},
+    conversations: {},
+  };
+  const COMPOSER_IGNORE_SELECTOR = [
+    'textarea',
+    '[role="textbox"]',
+    '[contenteditable="true"]',
+    '[data-testid*="composer"]',
+    '[data-testid*="chat-input"]',
+    '[data-testid*="message-input"]',
+    '[class*="composer"]',
+    '[class*="chat-input"]',
+    '[class*="prompt-textarea"]',
+    'form',
+    'footer',
+  ].join(', ');
 
   function normalizeText(value) {
     return (value || '').replace(/\s+/g, ' ').trim();
@@ -27,29 +47,124 @@
       .replace(/'/g, '&#39;');
   }
 
-  function storageGet(key, fallbackValue) {
+  function createDefaultData() {
+    return {
+      folders: [],
+      conversationFolders: {},
+      conversations: {},
+      sortMode: 'updated-desc',
+    };
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function sanitizeFolder(folder) {
+    return {
+      id: normalizeText(folder?.id || ''),
+      name: normalizeText(folder?.name || ''),
+      color: clampColor(folder?.color),
+      createdAt: Number(folder?.createdAt) || Date.now(),
+    };
+  }
+
+  function sanitizePrefs(value) {
+    const folders = Array.isArray(value?.folders) ? value.folders : [];
+    const sortMode = ['updated-desc', 'title-asc', 'title-desc'].includes(value?.sortMode)
+      ? value.sortMode
+      : 'updated-desc';
+    return {
+      folders: folders.map(sanitizeFolder).filter((folder) => folder.id && folder.name),
+      sortMode,
+    };
+  }
+
+  function sanitizeCatalog(value) {
+    return {
+      conversations: isPlainObject(value?.conversations) ? { ...value.conversations } : {},
+      conversationFolders: isPlainObject(value?.conversationFolders) ? { ...value.conversationFolders } : {},
+    };
+  }
+
+  function splitLegacyData(value) {
+    const prefs = sanitizePrefs(value);
+    const catalog = sanitizeCatalog(value);
+    return { prefs, catalog };
+  }
+
+  function storageRead(areaName, key, fallbackValue) {
     return new Promise((resolve) => {
-      if (!chrome?.storage?.sync?.get) {
-        resolve(fallbackValue);
+      const storageArea = chrome?.storage?.[areaName];
+      if (!storageArea?.get) {
+        resolve({ value: fallbackValue, found: false, error: null });
         return;
       }
       try {
-        chrome.storage.sync.get({ [key]: fallbackValue }, (items) => {
-          resolve(items?.[key] ?? fallbackValue);
+        storageArea.get(key, (items) => {
+          const error = chrome.runtime?.lastError?.message || '';
+          if (error) {
+            console.warn(`[ThreadAtlas] ${areaName}.get(${key}) failed:`, error);
+            resolve({ value: fallbackValue, found: false, error });
+            return;
+          }
+          const found = !!items && Object.prototype.hasOwnProperty.call(items, key);
+          resolve({
+            value: found ? items[key] : fallbackValue,
+            found,
+            error: null,
+          });
         });
       } catch (_error) {
-        resolve(fallbackValue);
+        resolve({ value: fallbackValue, found: false, error: String(_error?.message || _error) });
       }
     });
   }
 
-  function storageSet(key, value) {
-    if (!chrome?.storage?.sync?.set) return;
-    try {
-      chrome.storage.sync.set({ [key]: value });
-    } catch (_error) {
-      // noop
-    }
+  function storageWrite(areaName, key, value) {
+    return new Promise((resolve) => {
+      const storageArea = chrome?.storage?.[areaName];
+      if (!storageArea?.set) {
+        resolve({ ok: false, error: `${areaName}.set unavailable` });
+        return;
+      }
+      try {
+        storageArea.set({ [key]: value }, () => {
+          const error = chrome.runtime?.lastError?.message || '';
+          if (error) {
+            console.warn(`[ThreadAtlas] ${areaName}.set(${key}) failed:`, error);
+            resolve({ ok: false, error });
+            return;
+          }
+          resolve({ ok: true, error: null });
+        });
+      } catch (_error) {
+        resolve({ ok: false, error: String(_error?.message || _error) });
+      }
+    });
+  }
+
+  function storageRemove(areaName, key) {
+    return new Promise((resolve) => {
+      const storageArea = chrome?.storage?.[areaName];
+      if (!storageArea?.remove) {
+        resolve({ ok: false, error: `${areaName}.remove unavailable` });
+        return;
+      }
+      try {
+        storageArea.remove(key, () => {
+          const error = chrome.runtime?.lastError?.message || '';
+          if (error) {
+            console.warn(`[ThreadAtlas] ${areaName}.remove(${key}) failed:`, error);
+            resolve({ ok: false, error });
+            return;
+          }
+          resolve({ ok: true, error: null });
+        });
+      } catch (_error) {
+        resolve({ ok: false, error: String(_error?.message || _error) });
+      }
+    });
   }
 
   function uid(prefix) {
@@ -79,12 +194,7 @@
 
   class FolderFeature {
     constructor() {
-      this.data = {
-        folders: [],
-        conversationFolders: {},
-        conversations: {},
-        sortMode: 'updated-desc',
-      };
+      this.data = createDefaultData();
       this.loaded = false;
       this.loadPromise = null;
       this.persistTimer = null;
@@ -158,41 +268,73 @@
         return;
       }
 
-      this.loadPromise = storageGet(STORAGE_KEY, DEFAULT_DATA)
-        .then((value) => {
-          const next = value && typeof value === 'object' ? value : DEFAULT_DATA;
-          const folders = Array.isArray(next.folders) ? next.folders : [];
-          const conversationFolders = next.conversationFolders && typeof next.conversationFolders === 'object'
-            ? next.conversationFolders
-            : {};
-          const conversations = next.conversations && typeof next.conversations === 'object'
-            ? next.conversations
-            : {};
-          const sortMode = ['updated-desc', 'title-asc', 'title-desc'].includes(next.sortMode)
-            ? next.sortMode
-            : 'updated-desc';
+      this.loadPromise = (async () => {
+        const migratedResult = await storageRead('local', STORAGE_KEYS.migrated, false);
+        const hasMigrated = migratedResult.found && !!migratedResult.value;
+
+        let nextPrefs = createDefaultData();
+        let nextCatalog = {
+          conversations: {},
+          conversationFolders: {},
+        };
+
+        if (!hasMigrated) {
+          const legacyResult = await storageRead('sync', STORAGE_KEYS.legacy, null);
+          if (legacyResult.found && isPlainObject(legacyResult.value)) {
+            const split = splitLegacyData(legacyResult.value);
+            nextPrefs = {
+              folders: split.prefs.folders,
+              sortMode: split.prefs.sortMode,
+            };
+            nextCatalog = {
+              conversations: split.catalog.conversations,
+              conversationFolders: split.catalog.conversationFolders,
+            };
+          } else {
+            const [prefsResult, catalogResult] = await Promise.all([
+              storageRead('sync', STORAGE_KEYS.prefs, DEFAULT_PREFS),
+              storageRead('local', STORAGE_KEYS.catalog, DEFAULT_CATALOG),
+            ]);
+            nextPrefs = sanitizePrefs(prefsResult.value);
+            nextCatalog = sanitizeCatalog(catalogResult.value);
+          }
 
           this.data = {
-            folders: folders
-              .map((folder) => ({
-                id: normalizeText(folder.id || ''),
-                name: normalizeText(folder.name || ''),
-                color: clampColor(folder.color),
-                createdAt: Number(folder.createdAt) || Date.now(),
-              }))
-              .filter((folder) => folder.id && folder.name),
-            conversationFolders: { ...conversationFolders },
-            conversations: { ...conversations },
-            sortMode,
+            folders: nextPrefs.folders,
+            conversationFolders: nextCatalog.conversationFolders,
+            conversations: nextCatalog.conversations,
+            sortMode: nextPrefs.sortMode,
           };
-
           this.pruneInvalidMappings();
           this.limitConversations();
+          await this.persistSplitData({
+            markMigrated: true,
+            removeLegacy: legacyResult?.found,
+          });
           this.loaded = true;
-        })
-        .finally(() => {
-          this.loadPromise = null;
-        });
+          return;
+        }
+
+        const [prefsResult, catalogResult] = await Promise.all([
+          storageRead('sync', STORAGE_KEYS.prefs, DEFAULT_PREFS),
+          storageRead('local', STORAGE_KEYS.catalog, DEFAULT_CATALOG),
+        ]);
+        nextPrefs = sanitizePrefs(prefsResult.value);
+        nextCatalog = sanitizeCatalog(catalogResult.value);
+
+        this.data = {
+          folders: nextPrefs.folders,
+          conversationFolders: nextCatalog.conversationFolders,
+          conversations: nextCatalog.conversations,
+          sortMode: nextPrefs.sortMode,
+        };
+
+        this.pruneInvalidMappings();
+        this.limitConversations();
+        this.loaded = true;
+      })().finally(() => {
+        this.loadPromise = null;
+      });
 
       await this.loadPromise;
     }
@@ -226,13 +368,42 @@
       });
     }
 
+    async persistSplitData({ markMigrated = false, removeLegacy = false } = {}) {
+      const prefs = sanitizePrefs(this.data);
+      const catalog = sanitizeCatalog(this.data);
+      const writeResults = await Promise.all([
+        storageWrite('sync', STORAGE_KEYS.prefs, prefs),
+        storageWrite('local', STORAGE_KEYS.catalog, catalog),
+      ]);
+      const allWritten = writeResults.every((result) => result?.ok);
+
+      if (!allWritten) {
+        return false;
+      }
+
+      if (markMigrated) {
+        const markerResult = await storageWrite('local', STORAGE_KEYS.migrated, true);
+        if (!markerResult.ok) {
+          return false;
+        }
+      }
+
+      if (removeLegacy) {
+        await storageRemove('sync', STORAGE_KEYS.legacy);
+      }
+
+      return true;
+    }
+
     persistDataDebounced() {
       if (this.persistTimer) {
         clearTimeout(this.persistTimer);
       }
       this.persistTimer = setTimeout(() => {
         this.persistTimer = null;
-        storageSet(STORAGE_KEY, this.data);
+        this.persistSplitData().catch((error) => {
+          console.warn('[ThreadAtlas] folder storage persist failed:', error);
+        });
       }, 180);
     }
 
@@ -372,6 +543,9 @@
       if (!Array.isArray(records) || !records.length) return false;
       for (const record of records) {
         if (!record) continue;
+        if (record.target instanceof HTMLElement && (record.target.matches(COMPOSER_IGNORE_SELECTOR) || record.target.closest(COMPOSER_IGNORE_SELECTOR))) {
+          continue;
+        }
         const candidates = [];
         record.addedNodes?.forEach((node) => {
           if (node instanceof HTMLElement) candidates.push(node);
@@ -384,6 +558,7 @@
         }
 
         for (const node of candidates) {
+          if (node.matches(COMPOSER_IGNORE_SELECTOR) || node.closest(COMPOSER_IGNORE_SELECTOR)) continue;
           if (node.closest('.ced-folder-sidebar, .ced-panel, .ced-timeline-bar')) continue;
           if (node.matches('aside, nav, [data-testid*="sidebar"], [class*="sidebar"], a[href*="/c/"]')) {
             return true;

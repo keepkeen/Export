@@ -1,5 +1,56 @@
 # Lessons
 
+## 2026-03-25
+
+### 用户纠偏：结构同步和完整快照必须拆开，不能继续让 `refreshConversationData()` 包办一切
+- 触发场景：用户指出“现在还是必须得点一下导出，才会解析对话吗”，根因是完整 turns 解析、标题更新、面板刷新、timeline 刷新和导出预热仍然绑在同一个 `refreshConversationData()` 里，平时只做 live 结构同步，full snapshot 要等导出面板打开才触发。
+- 本次修正规则：
+  - 会话刷新必须拆成两层：`live snapshot` 给 timeline / 当前窗口 UI，`full snapshot` 给导出 / 完整轮次列表 / context sync。
+  - 页面初始化先做 `live snapshot` 保证首屏响应，再在 idle 做 `full snapshot warmup`，不能让用户靠点导出触发完整预热。
+  - scheduler 的 conversation impact 只标记 `fullSnapshotDirty` 并安排 idle warmup，不再把普通 DOM 变更直接升级成全量解析。
+
+### 用户纠偏：ChatGPT 选择器不能只押旧版 `conversation-turn-*` 结构
+- 触发场景：用户提供 modernization 补丁，说明新版 ChatGPT DOM 会混用 `data-message-author-role`、`data-message-content`、`article[data-turn]` 与不同层级的 conversation testid。
+- 本次修正规则：
+  - ChatGPT selector 必须同时覆盖宿主显式 role/content 标记和 turn root fallback，不要只依赖单一 `data-testid^=conversation-turn-`。
+  - stable id 生成优先读取宿主显式 id/token；拿不到时再退回内容摘要或 synthetic id。
+  - timeline 的 scroll container 解析优先选真实可滚动容器，而不是命中第一个 selector 就返回。
+
+### 用户纠偏：选择状态必须区分“未初始化”和“用户显式空选”
+- 触发场景：用户点击“取消全选”后，只要 `refreshConversationData()` 再跑一次，旧逻辑就会把空选区重新补成全选，导致子集导出不稳定。
+- 本次修正规则：
+  - 选区状态不能只看 `selectedTurnIds.size`，必须额外区分 `auto/all/custom/none` 这类显式模式。
+  - 同一会话内，用户明确清空选择后，refresh 必须保持空选区；只有新会话首次进入时才恢复默认全选。
+  - 任何“旧选区对不上新 turns”的情况都不能再自动 fallback 成全选，先保证用户意图不被覆盖。
+
+### 用户纠偏：turn / round 主键必须稳定，不能直接拿内容签名当身份
+- 触发场景：message id 由 `role + text + markdown + html + images + attachments` 计算，流式输出、markdown 修补、图片补全后 id 会漂移，进一步打坏 selection、timeline marker meta、focus 与归档定位。
+- 本次修正规则：
+  - turn id 优先使用宿主提供的稳定 root 标识；拿不到时为消息根节点分配一次性 synthetic id，而不是每次重新算内容签名。
+  - round marker 必须优先复用已有 round；新 round 默认锚到稳定 turn id，而不是依赖“当前解析出来的优先 user turn”。
+  - 导出快照过滤只能按顶层消息根节点走，不能把宽泛消息 selector 直接用于 clone 树删除。
+
+### 用户纠偏：时间轴和归档不能靠硬截断或整页 reload 掩盖问题
+- 触发场景：时间轴把超长会话前面的 marker 直接 slice 掉；focus 归档 round 失败时还会整页 reload，进一步放大 marker id 不稳定问题。
+- 本次修正规则：
+  - 时间轴数据层不能再做“只保留最后 N 条 marker”的硬截断；如果需要性能优化，只能做渲染层虚拟化，不能裁掉历史数据。
+  - 归档 round 聚焦失败时优先返回空并保留当前页面状态，禁止直接 `location.reload()`。
+  - round 分组若 role 不可靠，宁可使用保守的回退分组，也不要把多轮长对话错误并成一轮。
+
+### 用户纠偏：重叠消息选择器去重必须保留消息根节点
+- 触发场景：ChatGPT 时间轴识别不到对话轮次，原因是 `[data-testid^="conversation-turn-"], [data-message-author-role]` 同时命中父子节点时，去重逻辑保留了最深层子节点。
+- 本次修正规则：
+  - 对消息节点做去重时，优先保留最外层消息根节点，跳过其内部命中的子节点。
+  - 任何 `dedupe` 实现只要用于消息根选择器，都不能用“反向遍历 + 屏蔽祖先”的策略。
+  - 站点选择器同时包含根节点和内容子节点时，必须先验证去重后的节点是否仍可作为 round/marker 根节点。
+
+### 用户纠偏：ChatGPT 解析结果不能强依赖 round/archive store 才能返回
+- 触发场景：DOM 明明已解析出 turns，但 ChatGPT 分支把返回值强绑到 `collectArchiveTurns()`，只要 round store 同步失败或为空，`state.turns` 就会被写成空数组，时间轴和导出一起失效。
+- 本次修正规则：
+  - ChatGPT parser 在拿到 `domTurns` 后，必须以 `domTurns` 作为保底返回值。
+  - round/archive store 是增强层，不是主链路单点依赖；store 空结果不能覆盖已经成功解析的 DOM turns。
+  - 时间轴若默认只吃 `user` marker，必须在 `user` 结果为空时自动降级到 `all`，避免角色误判导致整条时间轴消失。
+
 ## 2026-02-27
 
 ### 用户纠偏：不要停在“发现上层仓库脏改动”这一步
@@ -180,3 +231,38 @@
   - 设计扩展图标时必须同时检查 `16/32/48/128` 四档，不只看大尺寸预览。
   - 小尺寸图标需要单独做线条加粗和细节减法，避免缩小后糊成字母块或噪点。
   - 图标生成脚本改版后，至少人工看一遍 `16px` 与 `32px` 的实际输出。
+
+### 用户纠偏：初始化报错时要先查同步递归源，避免继续叠加“自恢复”逻辑
+- 触发场景：用户反馈 `init failed RangeError: Maximum call stack size exceeded`，说明初始化链路里存在同步重入，而不是单纯“节点没挂上”。
+- 本次修正规则：
+  - 初始化阶段出现栈溢出时，先检查 `init -> ensure -> configure/render -> init` 这类同步环，不要继续往上叠加守护逻辑。
+  - 需要做可见性/自恢复时，必须先确认关键函数具备重入保护，再加定时器或 observer。
+  - 修复栈溢出优先做调用链减法，移除多余入口，而不是继续加兜底。
+
+### 用户纠偏：装饰性效果默认值要克制，popup 视觉不能靠“风格化词藻”堆出来
+- 触发场景：用户要求取消默认雪花动效，并指出 popup 界面“太抽象”，说明默认体验和视觉语言都偏离了高频工具场景。
+- 本次修正规则：
+  - 装饰类效果默认关闭，除非它直接提升功能理解，而不是单纯增加存在感。
+  - popup 文案优先描述可执行动作和页面状态，避免品牌化空话、概念词和装饰性标题占据首屏。
+  - 重做 popup 时先参考成熟扩展的宿主约束和布局范式，再决定视觉语言，不从大面积风格化背景开始。
+
+### 用户纠偏：页面“裁剪后仍卡”时要先查输入期链路，不要只盯渲染结果
+- 触发场景：用户反馈长会话裁剪后仍然在输入问题时严重卡顿，说明压力来自持续 DOM 观察与刷新链路，而不只是可见消息节点数量。
+- 本次修正规则：
+  - 性能排查优先区分“滚动/渲染卡顿”和“输入期卡顿”，输入期重点检查 composer subtree 上的 MutationObserver、selection/IME 相关 DOM 变化和同步布局读写。
+  - 对长会话优化不能只做裁剪结果，还要确保观察器不会在每次输入时触发 timeline/history/meta/heavy refresh。
+  - 做性能优化时优先减少输入期不必要的工作，再考虑缓存和节流参数微调。
+
+### 用户纠偏：长会话性能问题不能继续堆全局 observer，要先收敛成“会话内核 + 调度器”
+- 触发场景：用户系统性指出插件还在持续做全局观察、轮询、全量重扫、克隆和重建，导致与 ChatGPT 页面互相放大卡顿。
+- 本次修正规则：
+  - 遇到“功能很多但都依赖 DOM 重扫”的扩展代码时，优先抽出统一会话内核和运行时调度器，再处理单点微优化。
+  - Timeline / History / Export / Folder 这类共享同一份会话语义的数据，不允许再各自 query 全量 DOM。
+  - 去性能问题时先删轮询和整页 observer，再谈缓存和动画参数调优。
+
+### 用户纠偏：浏览器同步存储不是数据库，增长型目录数据必须拆到 local/IndexedDB
+- 触发场景：用户明确指出 `storage.sync` 配额有限，而文件夹/会话目录正在向“增长型 catalog”演变。
+- 本次修正规则：
+  - `chrome.storage.sync` 只保留轻量偏好、开关和小型定义数据；增长型目录、会话索引、缓存一律放 `storage.local` 或 IndexedDB。
+  - 所有 storage 封装都必须检查 `chrome.runtime.lastError`，不能静默吞掉 quota/频率错误。
+  - 只要用户提到“同步不稳定 / 数据偶尔丢 / 配额风险”，优先回查是否把大对象写进了 sync。

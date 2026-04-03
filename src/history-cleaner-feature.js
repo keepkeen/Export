@@ -11,10 +11,24 @@
     getTurns: null,
     getObserveTarget: null,
     applyTrim: null,
-    messageTurnSelector: '[data-testid^="conversation-turn-"], article',
+    messageTurnSelector: '[data-testid^="conversation-turn-"], [data-message-author-role]',
     beforeTrim: null,
     onTrim: null,
   };
+  const COMPOSER_IGNORE_SELECTOR = [
+    'textarea',
+    '[role="textbox"]',
+    '[contenteditable="true"]',
+    '[data-testid="prompt-textarea"]',
+    '[data-testid*="composer"]',
+    '[data-testid*="chat-input"]',
+    '[data-testid*="message-input"]',
+    '[class*="composer"]',
+    '[class*="chat-input"]',
+    '[class*="prompt-textarea"]',
+    'form',
+    'footer',
+  ].join(', ');
 
   function clampKeepRounds(value) {
     const numeric = Number(value);
@@ -116,6 +130,7 @@
       if (!isElement(node)) return false;
       if (Array.from(node.classList || []).some((name) => name && name.startsWith('ced-'))) return false;
       if (node.closest('.ced-panel, .ced-toast, .ced-timeline-bar, .ced-folder-sidebar')) return false;
+      if (node.matches(COMPOSER_IGNORE_SELECTOR) || node.closest(COMPOSER_IGNORE_SELECTOR)) return false;
       if (node.matches(this.options.messageTurnSelector)) return true;
       return !!node.querySelector?.(this.options.messageTurnSelector);
     }
@@ -269,6 +284,11 @@
         };
       }
 
+      // 自动维护时显示带撤销选项的通知
+      if (options.autoMaintain === true && result.ok && result.removedRounds > 0) {
+        this.showTrimNotification(result);
+      }
+
       if (typeof this.options.onTrim === 'function') {
         try {
           this.options.onTrim(result);
@@ -277,6 +297,37 @@
         }
       }
       return result;
+    }
+
+    showTrimNotification(result) {
+      // 检查是否存在 showToast 函数（由 content-script 注入）
+      if (typeof window.__cedShowToast !== 'function') return;
+
+      const removedCount = result.removedRounds || 0;
+      const toastEl = window.__cedShowToast(`已自动归档 ${removedCount} 轮旧对话`, 8000, [
+        {
+          text: '撤销',
+          action: () => {
+            this.undoTrim(result);
+          }
+        }
+      ]);
+    }
+
+    undoTrim(result) {
+      // 尝试恢复被归档的内容（如果归档系统支持）
+      if (typeof this.options.onUndoTrim === 'function') {
+        try {
+          this.options.onUndoTrim(result);
+          if (typeof window.__cedShowToast === 'function') {
+            window.__cedShowToast('已撤销归档', 3000);
+          }
+        } catch (_error) {
+          if (typeof window.__cedShowToast === 'function') {
+            window.__cedShowToast('撤销失败', 3000);
+          }
+        }
+      }
     }
 
     getStats() {

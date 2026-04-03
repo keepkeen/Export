@@ -20,7 +20,7 @@
   const DEFAULT_OPTIONS = {
     enabled: true,
     markerRole: 'user',
-    maxMarkers: 320,
+    maxMarkers: 0,
     shortcutEnabled: true,
     previewEnabled: true,
     exportQuickEnabled: true,
@@ -31,7 +31,7 @@
     onExportConfigChange: null,
     onExportNow: null,
     onActiveChange: null,
-    messageTurnSelector: '[data-testid^="conversation-turn-"], article',
+    messageTurnSelector: '[data-testid^="conversation-turn-"], [data-message-author-role]',
     userRoleSelector: '[data-message-author-role="user"]',
   };
 
@@ -127,8 +127,6 @@
         contextMenu: null,
       };
 
-      this.locationHref = '';
-      this.locationTimer = null;
       this.scrollRaf = null;
       this.scrollAnimationRaf = null;
       this.scrollAnimationToken = 0;
@@ -141,6 +139,9 @@
       this.lastActiveChangeAt = 0;
       this.lastMarkerTopRefreshAt = 0;
       this.markerTops = [];
+      this.markerTopDirtyStart = 0;
+      this.markerTopLayoutSignature = '';
+      this.markerIndexById = new Map();
       this.dotOffsets = [];
       this.markerRenderSignature = '';
       this.exportFileNameTimer = null;
@@ -150,6 +151,7 @@
       this.launcherHideTimer = null;
       this.launcherVisible = false;
       this.isRenderingExportQuick = false;
+      this.summaryCache = new WeakMap();
 
       this.handleTrackClick = this.handleTrackClick.bind(this);
       this.handleTrackOver = this.handleTrackOver.bind(this);
@@ -180,7 +182,6 @@
         this.ensureUi();
         this.attachEvents();
         this.initialized = true;
-        this.startLocationWatch();
       }
 
       this.configure(options);
@@ -208,7 +209,6 @@
     }
 
     destroy() {
-      this.stopLocationWatch();
       this.detachEvents();
       this.bindScrollContainer(null);
       this.removeUi();
@@ -240,6 +240,9 @@
 
       this.markers = [];
       this.markerTops = [];
+      this.markerTopDirtyStart = 0;
+      this.markerTopLayoutSignature = '';
+      this.markerIndexById.clear();
       this.dotOffsets = [];
       this.markerMeta.clear();
       this.activeIndex = -1;
@@ -275,15 +278,17 @@
       const nextSignature = this.buildMarkerRenderSignature(nextMarkers);
       const markersChanged = nextSignature !== this.markerRenderSignature;
       this.markers = nextMarkers;
+      this.rebuildMarkerIndex();
 
       if (markersChanged) {
         this.renderMarkers();
-        this.computeMarkerTops();
         this.markerRenderSignature = nextSignature;
+        this.invalidateMarkerTopsFrom(0);
       } else {
         this.bindDotRefsFromDom();
-        this.computeMarkerTops();
       }
+
+      this.computeMarkerTopsIncremental();
 
       if (this.previewOpen || markersChanged) {
         this.renderPreviewList();
@@ -298,8 +303,32 @@
     buildMarkerRenderSignature(markers) {
       if (!Array.isArray(markers) || !markers.length) return 'empty';
       return markers
-        .map((marker) => `${marker.id}:${marker.level || 1}:${marker.starred ? 1 : 0}:${marker.archived ? 1 : 0}:${marker.restored ? 1 : 0}:${marker.summary || ''}`)
+        .map((marker) => `${marker.id}:${marker.roundIndex}:${marker.level || 1}:${marker.starred ? 1 : 0}:${marker.archived ? 1 : 0}:${marker.restored ? 1 : 0}:${marker.summary || ''}`)
         .join('|');
+    }
+
+    rebuildMarkerIndex() {
+      this.markerIndexById.clear();
+      this.markers.forEach((marker, index) => {
+        if (marker?.id) {
+          this.markerIndexById.set(marker.id, index);
+        }
+      });
+    }
+
+    invalidateMarkerTopsFrom(index = 0) {
+      const next = Math.max(0, Number(index) || 0);
+      const current = Number.isFinite(this.markerTopDirtyStart) ? this.markerTopDirtyStart : Number.POSITIVE_INFINITY;
+      this.markerTopDirtyStart = Math.min(current, next);
+    }
+
+    invalidateMarkerTopsFromMarkerId(markerId = '') {
+      const index = this.markerIndexById.get(markerId);
+      if (Number.isInteger(index) && index >= 0) {
+        this.invalidateMarkerTopsFrom(index);
+        return;
+      }
+      this.invalidateMarkerTopsFrom(0);
     }
 
     bindDotRefsFromDom() {
@@ -356,23 +385,6 @@
         });
 
       await this.stateLoadPromise;
-    }
-
-    startLocationWatch() {
-      this.stopLocationWatch();
-      this.locationHref = location.href;
-      this.locationTimer = setInterval(() => {
-        if (location.href === this.locationHref) return;
-        this.locationHref = location.href;
-        this.refresh();
-      }, 1100);
-    }
-
-    stopLocationWatch() {
-      if (this.locationTimer) {
-        clearInterval(this.locationTimer);
-        this.locationTimer = null;
-      }
     }
 
     ensureUi() {
@@ -597,12 +609,37 @@
       this.hideContextMenu();
     }
 
+    isScrollableContainer(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(element);
+      const overflowY = `${style.overflowY || ''} ${style.overflow || ''}`;
+      const canScroll = /(auto|scroll|overlay)/.test(overflowY);
+      return canScroll && (element.scrollHeight - element.clientHeight > 24);
+    }
+
     resolveScrollContainer() {
       const selectors = this.options.scrollContainerSelectors || [];
+      const markerElement = this.markers.find((marker) => marker?.element instanceof HTMLElement)?.element || null;
+      const candidates = [];
+
+      if (markerElement instanceof HTMLElement) {
+        let parent = markerElement.parentElement;
+        while (parent instanceof HTMLElement && parent !== document.body) {
+          candidates.push(parent);
+          parent = parent.parentElement;
+        }
+      }
+
       for (const selector of selectors) {
         const found = document.querySelector(selector);
         if (found instanceof HTMLElement) {
-          return found;
+          candidates.push(found);
+        }
+      }
+
+      for (const candidate of candidates) {
+        if (this.isScrollableContainer(candidate)) {
+          return candidate;
         }
       }
       return document.scrollingElement || document.documentElement || document.body;
@@ -617,7 +654,8 @@
       if (this.scrollContainer?.addEventListener) {
         this.scrollContainer.addEventListener('scroll', this.handleScroll, { passive: true });
       }
-      this.computeMarkerTops();
+      this.invalidateMarkerTopsFrom(0);
+      this.computeMarkerTopsIncremental();
     }
 
     getContainerScrollTop() {
@@ -667,16 +705,45 @@
       return rect.top - containerRect.top + this.getContainerScrollTop();
     }
 
-    computeMarkerTops() {
+    computeMarkerTopsIncremental() {
       if (!this.markers.length) {
         this.markerTops = [];
+        this.markerTopDirtyStart = 0;
+        this.markerTopLayoutSignature = '';
         this.lastMarkerTopRefreshAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
           ? performance.now()
           : Date.now();
         return;
       }
 
-      this.markerTops = this.markers.map((marker) => this.getElementOffsetTopInContainer(marker.element));
+      const scrollTop = this.getContainerScrollTop();
+      const containerRect = this.getContainerRect();
+      const layoutSignature = [
+        this.markers.length,
+        Math.round(containerRect.top || 0),
+        Math.round(this.getContainerClientHeight() || 0),
+        Math.round(scrollTop || 0),
+      ].join('|');
+
+      let start = Number.isFinite(this.markerTopDirtyStart) ? this.markerTopDirtyStart : 0;
+      if (layoutSignature !== this.markerTopLayoutSignature) {
+        start = 0;
+        this.markerTopLayoutSignature = layoutSignature;
+      }
+
+      start = Math.max(0, Math.min(start, this.markers.length - 1));
+
+      if (!Array.isArray(this.markerTops) || this.markerTops.length !== this.markers.length) {
+        this.markerTops = new Array(this.markers.length).fill(0);
+        start = 0;
+      }
+
+      for (let i = start; i < this.markers.length; i += 1) {
+        const marker = this.markers[i];
+        this.markerTops[i] = this.getElementOffsetTopInContainer(marker.element);
+      }
+
+      this.markerTopDirtyStart = Number.POSITIVE_INFINITY;
       this.lastMarkerTopRefreshAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
         ? performance.now()
         : Date.now();
@@ -699,23 +766,32 @@
     collectMarkers() {
       const turns = this.collectTurns();
       const markerRole = this.options.markerRole || 'user';
-      const selected = turns.filter((turn) => {
+      const selectedByRole = turns.filter((turn) => {
         if (markerRole === 'all') return true;
         return turn.role === markerRole;
       });
+      const selected = (markerRole !== 'all' && !selectedByRole.length && turns.length)
+        ? turns
+        : selectedByRole;
 
-      const capped = selected.slice(0, this.options.maxMarkers || 320);
+      const configuredMaxMarkers = Number(this.options.maxMarkers);
+      const shouldCapMarkers = Number.isFinite(configuredMaxMarkers) && configuredMaxMarkers > 0;
+      const maxMarkers = shouldCapMarkers ? Math.max(1, Math.round(configuredMaxMarkers)) : 0;
+      const startOffset = shouldCapMarkers ? Math.max(0, selected.length - maxMarkers) : 0;
+      const capped = shouldCapMarkers ? selected.slice(startOffset) : selected;
       return capped
         .filter((item) => isElement(item.node))
         .map((item, index) => {
           const meta = this.markerMeta.get(item.id) || { starred: false, level: 1 };
           const level = [1, 2, 3].includes(Number(meta.level)) ? Number(meta.level) : 1;
+          const roundIndex = Number.isFinite(Number(item.roundIndex)) ? Number(item.roundIndex) : (startOffset + index);
           return {
             id: item.id || `turn-${index}`,
             element: item.node,
             summary: clipText(item.summary || item.text || `Turn ${index + 1}`, 96),
             index,
-            roundIndex: Number.isFinite(Number(item.roundIndex)) ? Number(item.roundIndex) : index,
+            roundIndex,
+            displayIndex: Math.max(1, roundIndex + 1),
             starred: meta.starred === true,
             level,
             archived: item.archived === true,
@@ -737,6 +813,7 @@
               role: turn.role || 'assistant',
               summary: turn.preview || turn.text || '',
               text: turn.text || '',
+              roundIndex: Number.isFinite(Number(turn.roundIndex)) ? Number(turn.roundIndex) : index,
               archived: turn.archived === true,
               restored: turn.restored === true,
               onActivate: typeof turn.onActivate === 'function' ? turn.onActivate : null,
@@ -747,7 +824,7 @@
         }
       }
 
-      const messageSelector = this.options.messageTurnSelector || '[data-testid^="conversation-turn-"], article';
+      const messageSelector = this.options.messageTurnSelector || '[data-testid^="conversation-turn-"], [data-message-author-role]';
       const userSelector = this.options.userRoleSelector || '[data-message-author-role="user"]';
       const nodes = this.dedupeNodes(Array.from(document.querySelectorAll(messageSelector)));
 
@@ -778,7 +855,14 @@
       const out = [];
       for (let i = 0; i < list.length; i++) {
         const node = list[i];
-        if (out.some((existing) => node.contains(existing))) continue;
+        if (out.some((existing) => existing === node || existing.contains(node))) {
+          continue;
+        }
+        for (let j = out.length - 1; j >= 0; j--) {
+          if (node.contains(out[j])) {
+            out.splice(j, 1);
+          }
+        }
         out.push(node);
       }
       return out;
@@ -786,15 +870,15 @@
 
     extractSummaryForNode(node) {
       if (!(node instanceof HTMLElement)) return '';
-      const cached = node.dataset.cedTimelineSummary;
-      if (cached) return cached;
-
       const candidate = node.querySelector('.markdown p, .prose p, p, li, h1, h2, h3, h4, pre, code') || node;
       const raw = candidate.textContent || node.textContent || '';
-      const summary = clipText(raw, 96);
-      if (summary) {
-        node.dataset.cedTimelineSummary = summary;
+      const signature = `${raw.length}:${raw.slice(0, 96)}`;
+      const cached = this.summaryCache.get(node);
+      if (cached && cached.signature === signature) {
+        return cached.summary;
       }
+      const summary = clipText(raw, 96);
+      this.summaryCache.set(node, { signature, summary });
       return summary;
     }
 
@@ -834,7 +918,7 @@
         dot.dataset.markerIndex = String(index);
         dot.dataset.summary = marker.summary;
         dot.dataset.markerId = marker.id;
-        dot.setAttribute('aria-label', marker.summary || `Turn ${index + 1}`);
+        dot.setAttribute('aria-label', marker.summary || `Turn ${marker.displayIndex || index + 1}`);
 
         const n = total <= 1 ? 0.5 : index / (total - 1);
         const topPx = inset + n * usableHeight;
@@ -861,7 +945,7 @@
       }
 
       const html = filtered.map((marker) => {
-        const idx = marker.index + 1;
+        const idx = marker.displayIndex || marker.index + 1;
         const star = marker.starred ? '<span class="ced-timeline-preview-flag">★</span>' : '';
         const level = `<span class="ced-timeline-preview-level" data-level="${marker.level}">L${marker.level}</span>`;
         const archive = marker.archived
@@ -977,7 +1061,16 @@
         if (active) activeItem = item;
       });
       if (this.previewOpen && activeItem instanceof HTMLElement) {
-        activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        const list = this.ui.previewList;
+        if (list instanceof HTMLElement) {
+          const itemTop = activeItem.offsetTop;
+          const itemBottom = itemTop + activeItem.offsetHeight;
+          const viewTop = list.scrollTop;
+          const viewBottom = viewTop + list.clientHeight;
+          if (itemTop < viewTop || itemBottom > viewBottom) {
+            activeItem.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+          }
+        }
       }
     }
 
@@ -1064,7 +1157,8 @@
         if (!activatedBeforeScroll) {
           this.activateMarker(marker, nextIndex);
         }
-        this.computeMarkerTops();
+        this.invalidateMarkerTopsFrom(nextIndex);
+        this.computeMarkerTopsIncremental();
         this.setActiveIndex(nextIndex);
         this.lastActiveChangeAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
           ? performance.now()
@@ -1272,11 +1366,8 @@
       if (this.scrollRaf) return;
       this.scrollRaf = requestAnimationFrame(() => {
         this.scrollRaf = null;
-        const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
-          ? performance.now()
-          : Date.now();
-        if ((now - this.lastMarkerTopRefreshAt) > 360) {
-          this.computeMarkerTops();
+        if (Number.isFinite(this.markerTopDirtyStart)) {
+          this.computeMarkerTopsIncremental();
         }
         this.updateActiveDotFromViewport();
       });
@@ -1343,8 +1434,10 @@
 
     handleResize() {
       this.hideTooltip(true);
+      this.bindScrollContainer(this.resolveScrollContainer());
       this.renderMarkers();
-      this.computeMarkerTops();
+      this.invalidateMarkerTopsFrom(0);
+      this.computeMarkerTopsIncremental();
       this.updateActiveDotFromViewport();
       this.renderExportQuick();
       this.updateFloatingPositions();
@@ -1739,6 +1832,8 @@
     initialize: (options) => timelineFeature.initialize(options),
     configure: (options) => timelineFeature.configure(options),
     refresh: () => timelineFeature.refresh(),
+    invalidateMarkerTopsFrom: (index) => timelineFeature.invalidateMarkerTopsFrom(index),
+    invalidateMarkerTopsFromMarkerId: (markerId) => timelineFeature.invalidateMarkerTopsFromMarkerId(markerId),
     setEnabled: (enabled) => timelineFeature.setEnabled(enabled),
     destroy: () => timelineFeature.destroy(),
   };

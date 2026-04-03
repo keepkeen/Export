@@ -6,10 +6,18 @@
   window.__cedInitialized = true;
 
   // Patch html2canvas color parsing for modern CSS color functions.
-  function patchHtml2canvasColorParser(attempt = 0) {
-    const MODERN_COLOR_RE = /\b(?:oklch|oklab|lch|lab|color)\([^)]+\)/gi;
+  let colorConverterEl = null;
 
-    const colorConverterEl = document.createElement('div');
+  function patchHtml2canvasColorParser(attempt = 1) {
+    const MODERN_COLOR_RE = /\b(?:oklch|oklab|lch|lab|color)\([^)]+\)/i;
+    const MODERN_COLOR_RE_GLOBAL = /\b(?:oklch|oklab|lch|lab|color)\([^)]+\)/gi;
+
+    // 清理旧的元素，避免内存泄漏
+    if (colorConverterEl && colorConverterEl.parentNode) {
+      colorConverterEl.parentNode.removeChild(colorConverterEl);
+    }
+
+    colorConverterEl = document.createElement('div');
     colorConverterEl.style.display = 'none';
     const mountTarget = document.body || document.documentElement;
     if (!mountTarget) {
@@ -36,7 +44,7 @@
     const normalizeString = (value) => {
       if (!value || typeof value !== 'string') return value;
       if (!MODERN_COLOR_RE.test(value)) return value;
-      return value.replace(MODERN_COLOR_RE, (match) => toRgb(match));
+      return value.replace(MODERN_COLOR_RE_GLOBAL, (match) => toRgb(match));
     };
 
     const patchInstance = (instance) => {
@@ -137,9 +145,11 @@
     folderSpacing: 'ced-folder-spacing',
     markdownPatcherEnabled: 'ced-markdown-patcher-enabled',
     snowEffectEnabled: 'ced-snow-effect-enabled',
+    snowEffectDefaultOffApplied: 'ced-snow-effect-default-off-v1',
     historyCleanerKeepRounds: 'ced-history-cleaner-keep-rounds',
     historyCleanerAutoMaintain: 'ced-history-cleaner-auto-maintain',
     historyCleanerDefaultOnApplied: 'ced-history-cleaner-default-on-v1',
+    exportRenderScope: 'ced-export-render-scope',
     contextSyncEnabled: 'ced-context-sync-enabled',
     contextSyncPort: 'ced-context-sync-port'
   };
@@ -148,6 +158,20 @@
   const IMAGE_TOKEN_SUFFIX = '__';
   const HISTORY_FOCUS_RELOAD_KEY = '__ced-history-focus-reload-v1';
   const HISTORY_FOCUS_RADIUS = 3;
+  const COMPOSER_IGNORE_SELECTOR = [
+    'textarea',
+    '[role="textbox"]',
+    '[contenteditable="true"]',
+    '[data-testid="prompt-textarea"]',
+    '[data-testid*="composer"]',
+    '[data-testid*="chat-input"]',
+    '[data-testid*="message-input"]',
+    '[class*="composer"]',
+    '[class*="chat-input"]',
+    '[class*="prompt-textarea"]',
+    'form',
+    'footer',
+  ].join(', ');
 
   const SITE_KEYS = {
     chatgpt: 'chatgpt',
@@ -175,20 +199,23 @@
   const SITE_CONFIG = {
     [SITE_KEYS.chatgpt]: {
       selectors: {
-        MESSAGE_TURN: '[data-testid^="conversation-turn-"], article',
-        ROLE_USER: '[data-message-author-role="user"]',
-        ROLE_ASSISTANT: '[data-message-author-role="assistant"]',
-        AI_CONTENT: '.markdown, .prose, [data-message-author-role="assistant"] .text-message',
-        USER_CONTENT: '[data-message-author-role="user"]'
+        MESSAGE_TURN: '[data-message-author-role], article[data-turn], [data-testid^="conversation-turn-"], [data-testid*="conversation-turn"]',
+        ROLE_USER: '[data-message-author-role="user"], [data-author-role="user"], [data-role="user"]',
+        ROLE_ASSISTANT: '[data-message-author-role="assistant"], [data-author-role="assistant"], [data-role="assistant"]',
+        AI_CONTENT: '[data-message-author-role="assistant"] [data-message-content], [data-message-author-role="assistant"] .text-message, [data-message-author-role="assistant"] .markdown, [data-message-author-role="assistant"] .prose, [data-message-content], .markdown, .prose, [data-message-author-role="assistant"]',
+        USER_CONTENT: '[data-message-author-role="user"] [data-message-content], [data-message-author-role="user"] .text-message, [data-message-content], [data-message-author-role="user"]'
       },
       conversationRootSelectors: [
         '[data-testid="conversation-main"]',
         '[data-testid="conversation-container"]',
+        '[data-testid*="conversation"]',
         'main'
       ],
       scrollContainerSelectors: [
-        'main .overflow-y-auto',
         '[data-testid="conversation-main"]',
+        '[data-testid="conversation-container"]',
+        'main .overflow-y-auto',
+        '[data-testid*="conversation"]',
         'main'
       ],
       roleLabels: {
@@ -201,8 +228,8 @@
       exportBaseName: 'chatgpt-export',
       fallbackMessageSelectors: [
         '[data-testid^="conversation-turn-"]',
-        '[data-message-author-role]',
-        'article'
+        'article',
+        '[data-message-author-role]'
       ]
     },
     [SITE_KEYS.gemini]: {
@@ -338,8 +365,12 @@
     lastRefreshToken: 0,
     refreshTimer: null,
     selectedFormat: 'text',
+    liveTurns: [],
+    fullTurns: [],
     turns: [],
     selectedTurnIds: new Set(),
+    selectionMode: 'auto',
+    selectionContextKey: '',
     panelSide: 'right',
     imageCache: new Map(),
     exporting: false,
@@ -350,6 +381,7 @@
     parseMode: 'normal',
     activePanelTab: PANEL_TABS.export,
     formulaCopyFormat: 'latex',
+    exportRenderScope: 'window',
     timelineEnabled: true,
     timelineScrollMode: 'flow',
     titleUpdaterEnabled: true,
@@ -357,7 +389,7 @@
     sidebarAutoHideEnabled: false,
     folderSpacing: 2,
     markdownPatcherEnabled: true,
-    snowEffectEnabled: true,
+    snowEffectEnabled: false,
     historyCleanerKeepRounds: 10,
     historyCleanerAutoMaintain: true,
     contextSyncEnabled: false,
@@ -374,11 +406,20 @@
     historyArchiveApplyingWindow: false,
     historyArchiveFocusTimer: null,
     historyArchiveSyncTimer: null,
+    historyArchiveSyncIdleHandle: null,
     historyArchiveActiveMarkerId: '',
     timelineMounting: false,
     timelineRefreshTimer: null,
     heavyRefreshTimer: null,
+    fullSnapshotWarmTimer: null,
+    fullSnapshotWarmIdleHandle: null,
+    fullSnapshotReady: false,
+    fullSnapshotDirty: true,
+    fullSnapshotContextKey: '',
+    fullSnapshotToken: 0,
+    fullSnapshotInFlight: false,
     metaRefreshTimer: null,
+    metaRefreshIdleHandle: null,
     timelineEnsureTimer: null,
     timelineWatchTimer: null,
     observerFlushTimer: null,
@@ -391,12 +432,29 @@
     timelineTurnsCache: {
       signature: '',
       turns: []
-    }
+    },
+    toastTimer: null,
+    pendingEnhancerRoots: new Set(),
+    selectorMode: 'primary',
+    primarySelectorHits: 0,
+    fallbackSelectorHits: 0,
+    lastRefreshDurationMs: 0,
+    lastStorageError: '',
+    conversationStructureVersion: 0,
+    metaVersion: 0,
+    messageIdSequence: 0,
   };
   let storageSyncListenerBound = false;
   let timelineVisibilityWatchBound = false;
   let historyArchiveEventsBound = false;
+  let routeChangeListenerBound = false;
   const persistedValueCache = new Map();
+  let runtimeScheduler = null;
+  let conversationKernel = null;
+  let historyWindowManager = null;
+  let historyArchiveController = null;
+  let chatgptConversationParser = null;
+  let exportEngine = null;
 
   // --- 初始化 ---
   if (chrome?.runtime?.onMessage) {
@@ -438,6 +496,10 @@
         sendResponse?.(trimHistoryCleaner(message.keepRounds));
         return true;
       }
+      if (message.type === 'CED_DIAGNOSTICS_GET') {
+        sendResponse?.({ ok: true, diagnostics: getDiagnosticsSnapshot() });
+        return true;
+      }
       return undefined;
     });
   }
@@ -448,7 +510,14 @@
     await ensureDocumentReady();
     patchHtml2canvasColorParser();
     await hydrateSettings();
+    initRuntimeScheduler();
+    initConversationKernel();
+    initHistoryWindowManager();
+    initHistoryArchiveController();
+    initChatGptConversationParser();
+    initExportEngine();
     registerStorageSyncListener();
+    bindRouteChangeListener();
     injectToast();
     bindHistoryArchiveEvents();
     initFormulaCopyFeature();
@@ -463,7 +532,9 @@
     initMarkdownPatcherFeature();
     initSnowEffectFeature();
     attachPanel();
-    await refreshConversationData();
+    refreshConversationMetaOnly();
+    await refreshConversationSnapshot({ full: false, reason: 'init-live', syncUi: true });
+    scheduleFullSnapshotWarmup(0);
     initHistoryCleanerFeature();
     maybeRestorePendingHistoryFocus();
     observeConversation();
@@ -491,9 +562,16 @@
 
   function showToast(message, duration = 2200) {
     if (!state.toastEl) return;
+    if (state.toastTimer) {
+      clearTimeout(state.toastTimer);
+      state.toastTimer = null;
+    }
     state.toastEl.textContent = message;
     state.toastEl.classList.add('ced-toast--visible');
-    setTimeout(() => state.toastEl && state.toastEl.classList.remove('ced-toast--visible'), duration);
+    state.toastTimer = setTimeout(() => {
+      state.toastTimer = null;
+      state.toastEl && state.toastEl.classList.remove('ced-toast--visible');
+    }, duration);
   }
 
   function bindHistoryArchiveEvents() {
@@ -532,9 +610,11 @@
       [STORAGE_KEYS.folderSpacing]: state.folderSpacing,
       [STORAGE_KEYS.markdownPatcherEnabled]: state.markdownPatcherEnabled,
       [STORAGE_KEYS.snowEffectEnabled]: state.snowEffectEnabled,
+      [STORAGE_KEYS.snowEffectDefaultOffApplied]: false,
       [STORAGE_KEYS.historyCleanerKeepRounds]: state.historyCleanerKeepRounds,
       [STORAGE_KEYS.historyCleanerAutoMaintain]: state.historyCleanerAutoMaintain,
       [STORAGE_KEYS.historyCleanerDefaultOnApplied]: false,
+      [STORAGE_KEYS.exportRenderScope]: state.exportRenderScope,
       [STORAGE_KEYS.contextSyncEnabled]: state.contextSyncEnabled,
       [STORAGE_KEYS.contextSyncPort]: state.contextSyncPort
     };
@@ -583,6 +663,12 @@
     if (typeof stored[STORAGE_KEYS.snowEffectEnabled] === 'boolean') {
       state.snowEffectEnabled = stored[STORAGE_KEYS.snowEffectEnabled];
     }
+    const snowEffectDefaultOffApplied = stored[STORAGE_KEYS.snowEffectDefaultOffApplied] === true;
+    if (!snowEffectDefaultOffApplied) {
+      state.snowEffectEnabled = false;
+      persist(STORAGE_KEYS.snowEffectEnabled, false);
+      persist(STORAGE_KEYS.snowEffectDefaultOffApplied, true);
+    }
     if (typeof stored[STORAGE_KEYS.historyCleanerKeepRounds] === 'number') {
       state.historyCleanerKeepRounds = stored[STORAGE_KEYS.historyCleanerKeepRounds];
     }
@@ -601,12 +687,16 @@
     if (typeof stored[STORAGE_KEYS.contextSyncPort] === 'number') {
       state.contextSyncPort = stored[STORAGE_KEYS.contextSyncPort];
     }
+    if (typeof stored[STORAGE_KEYS.exportRenderScope] === 'string') {
+      state.exportRenderScope = normalizeExportRenderScope(stored[STORAGE_KEYS.exportRenderScope]);
+    }
     state.sidebarAutoHideEnabled = normalizeSidebarAutoHideEnabled(state.sidebarAutoHideEnabled);
     state.folderSpacing = normalizeFolderSpacing(state.folderSpacing);
     state.markdownPatcherEnabled = normalizeMarkdownPatcherEnabled(state.markdownPatcherEnabled);
     state.snowEffectEnabled = normalizeSnowEffectEnabled(state.snowEffectEnabled);
     state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds);
     state.historyCleanerAutoMaintain = normalizeHistoryCleanerAutoMaintain(state.historyCleanerAutoMaintain);
+    state.exportRenderScope = normalizeExportRenderScope(state.exportRenderScope);
     state.contextSyncEnabled = normalizeContextSyncEnabled(state.contextSyncEnabled);
     state.contextSyncPort = normalizeContextSyncPort(state.contextSyncPort);
   }
@@ -617,7 +707,19 @@
       return;
     }
     persistedValueCache.set(key, value);
-    chrome.storage.sync.set({ [key]: value });
+    chrome.storage.sync.set({ [key]: value }, () => {
+      const error = chrome.runtime?.lastError?.message || '';
+      if (error) {
+        state.lastStorageError = error;
+        conversationKernel?.updateMeta?.({ lastStorageError: error });
+        console.warn(`[ThreadAtlas] sync.set(${key}) failed:`, error);
+        return;
+      }
+      if (state.lastStorageError) {
+        state.lastStorageError = '';
+        conversationKernel?.updateMeta?.({ lastStorageError: '' });
+      }
+    });
   }
 
   function registerStorageSyncListener() {
@@ -639,6 +741,7 @@
         STORAGE_KEYS.snowEffectEnabled,
         STORAGE_KEYS.historyCleanerKeepRounds,
         STORAGE_KEYS.historyCleanerAutoMaintain,
+        STORAGE_KEYS.exportRenderScope,
         STORAGE_KEYS.contextSyncEnabled,
         STORAGE_KEYS.contextSyncPort,
       ];
@@ -650,6 +753,30 @@
       if (!Object.keys(patch).length) return;
       applySettingsPatch(patch, { persist: false, source: 'storage-sync' });
     });
+  }
+
+  function bindRouteChangeListener() {
+    if (routeChangeListenerBound) return;
+    routeChangeListenerBound = true;
+    window.addEventListener('ced-route-change', () => {
+      syncHistoryArchiveContext();
+      syncSelectionContext();
+      state.fullSnapshotReady = false;
+      state.fullSnapshotDirty = true;
+      state.fullSnapshotContextKey = '';
+      state.fullTurns = [];
+      state.turns = state.liveTurns;
+      observeConversation();
+      if (runtimeScheduler) {
+        runtimeScheduler.markDirty('conversation-sync');
+        runtimeScheduler.markDirty('meta-refresh', { phase: 'idle', timeout: 180 });
+        runtimeScheduler.markDirty('snapshot-warmup', { phase: 'idle', timeout: 260 });
+      } else {
+        scheduleHistoryArchiveSync(0);
+        scheduleMetaRefresh(120);
+        scheduleFullSnapshotWarmup(180);
+      }
+    }, { passive: true });
   }
 
   function attachPanel() {
@@ -1051,7 +1178,7 @@
   function buildSnowEffectSection() {
     const section = document.createElement('section');
     section.className = 'ced-section';
-    section.innerHTML = '<div class="ced-section__title">Snow Effect</div>';
+    section.innerHTML = '<div class="ced-section__title">雪花动效</div>';
 
     const row = document.createElement('label');
     row.className = 'ced-toggle-row';
@@ -1127,47 +1254,179 @@
 
   // --- 数据解析 (Data Parsing) ---
 
-  async function refreshConversationData() {
-    syncHistoryArchiveContext();
-    const token = ++state.lastRefreshToken;
-    const previousTurnsLength = state.turns.length;
+  function getTurnsForPanel() {
+    if (state.fullSnapshotReady
+      && !state.fullSnapshotDirty
+      && state.fullSnapshotContextKey === getSelectionContextKey()
+      && state.fullTurns.length) {
+      return state.fullTurns;
+    }
+    if (state.liveTurns.length) {
+      return state.liveTurns;
+    }
+    return state.fullTurns;
+  }
+
+  function reconcileTurnSelection(turns = []) {
+    const previousTurnsLength = Array.isArray(turns) ? turns.length : 0;
     const previousSelection = new Set(state.selectedTurnIds);
+    const previousSelectionMode = state.selectionMode || 'auto';
     const wasAllSelected = previousTurnsLength > 0 && previousSelection.size === previousTurnsLength;
 
-    state.pageTitle = detectConversationTitle();
-    if (state.nameInput) state.nameInput.placeholder = state.pageTitle || ACTIVE_SITE.defaultTitle;
-
-    const turns = SITE_KEY === SITE_KEYS.chatgpt
-      ? collectConversationTurnsForChatGpt()
-      : collectConversationTurns();
-    state.turns = turns;
-
     const nextSelection = new Set();
-    if (wasAllSelected || previousSelection.size === 0) {
+    if (previousSelectionMode === 'auto' || wasAllSelected || previousSelectionMode === 'all') {
       turns.forEach((turn) => nextSelection.add(turn.id));
+    } else if (previousSelectionMode === 'none') {
+      // Preserve explicit empty selection within the same conversation.
     } else {
       turns.forEach((turn) => {
         if (previousSelection.has(turn.id)) {
           nextSelection.add(turn.id);
         }
       });
-      if (!nextSelection.size) {
-        turns.forEach((turn) => nextSelection.add(turn.id));
-      }
     }
-    state.selectedTurnIds = nextSelection;
+    commitSelection(nextSelection, previousSelectionMode === 'auto' ? 'auto' : '', turns.length);
+  }
 
-    if (token === state.lastRefreshToken) {
-      if (isExportPanelOpen() || state.exporting) {
-        updateTurnList();
-      } else {
-        refreshPanelOverview();
-        refreshActionSection();
-      }
-      refreshTimelineFeature();
-      refreshFolderFeature();
-      refreshTitleUpdaterFeature();
+  function syncKernelAndUi(options = {}) {
+    const syncUi = options.syncUi !== false;
+    conversationKernel?.setSnapshot?.({
+      turns: state.liveTurns,
+      rounds: getKernelRoundsSnapshot(),
+      liveWindow: {
+        mode: state.historyArchiveWindowMode,
+        start: state.historyArchiveWindowStart,
+        end: state.historyArchiveWindowEnd,
+      },
+      selectorMode: state.selectorMode,
+      primarySelectorHits: state.primarySelectorHits,
+      fallbackSelectorHits: state.fallbackSelectorHits,
+      lastRefreshDurationMs: state.lastRefreshDurationMs,
+      lastStorageError: state.lastStorageError,
+    });
+    queueEnhancerRoots(state.liveTurns.map((turn) => turn.node).filter((node) => node instanceof HTMLElement));
+    invalidateTimelineMarkerTopsFromRound('');
+    refreshTimelineFeature();
+    if (!syncUi) return;
+    if (isExportPanelOpen() || state.exporting) {
+      updateTurnList();
+    } else {
+      refreshPanelOverview();
+      refreshActionSection();
     }
+  }
+
+  async function collectConversationTurnsForChatGptSnapshot(options = {}) {
+    const {
+      full = false,
+      allowAutoLoad = false,
+      applyWindow = true,
+    } = options;
+
+    if (full && allowAutoLoad) {
+      await autoLoadConversation();
+    }
+
+    const domTurns = collectConversationTurns();
+    if (!domTurns.length) {
+      return collectTurnsFromHistoryRounds();
+    }
+
+    syncHistoryRoundStore(domTurns);
+
+    if (applyWindow && state.historyCleanerAutoMaintain && state.historyArchiveWindowMode === 'latest') {
+      applyLatestHistoryWindow({
+        keepRounds: state.historyCleanerKeepRounds,
+        anchorMarkerId: state.historyArchiveOpenMarkerId || '',
+      });
+    }
+
+    if (full) {
+      return domTurns;
+    }
+
+    const archiveTurns = collectTurnsFromHistoryRounds();
+    return archiveTurns.length ? archiveTurns : domTurns;
+  }
+
+  async function refreshConversationSnapshot(options = {}) {
+    const {
+      full = false,
+      reason = 'manual',
+      force = false,
+      syncUi = true,
+      keepSelection = true,
+    } = options;
+
+    syncHistoryArchiveContext();
+    syncSelectionContext();
+    const refreshStartedAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+
+    if (full
+      && !force
+      && state.fullSnapshotReady
+      && !state.fullSnapshotDirty
+      && state.fullSnapshotContextKey === getSelectionContextKey()) {
+      if (syncUi) {
+        syncKernelAndUi({ syncUi: true });
+      }
+      return state.fullTurns.slice();
+    }
+
+    const token = full
+      ? ++state.fullSnapshotToken
+      : ++state.lastRefreshToken;
+
+    let parsedTurns = [];
+    if (SITE_KEY === SITE_KEYS.chatgpt) {
+      parsedTurns = await collectConversationTurnsForChatGptSnapshot({
+        full,
+        allowAutoLoad: full,
+        applyWindow: !full,
+      });
+    } else {
+      parsedTurns = collectConversationTurns();
+    }
+
+    const activeToken = full ? state.fullSnapshotToken : state.lastRefreshToken;
+    if (token !== activeToken) {
+      return null;
+    }
+
+    state.lastRefreshDurationMs = ((typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now()) - refreshStartedAt;
+    if (reason) {
+      state.lastRefreshReason = reason;
+    }
+
+    if (full) {
+      state.fullTurns = Array.isArray(parsedTurns) ? parsedTurns : [];
+      state.turns = state.fullTurns;
+      state.fullSnapshotReady = true;
+      state.fullSnapshotDirty = false;
+      state.fullSnapshotContextKey = getSelectionContextKey();
+    } else {
+      state.liveTurns = Array.isArray(parsedTurns) ? parsedTurns : [];
+      if (!state.fullTurns.length || state.fullSnapshotContextKey !== getSelectionContextKey()) {
+        state.turns = state.liveTurns;
+      }
+      state.conversationStructureVersion += 1;
+    }
+
+    if (keepSelection) {
+      reconcileTurnSelection(full ? state.fullTurns : getTurnsForPanel());
+    }
+
+    syncKernelAndUi({ syncUi });
+    return parsedTurns;
+  }
+
+  async function refreshConversationData() {
+    refreshConversationMetaOnly();
+    return refreshConversationSnapshot({ full: true, reason: 'legacy-full', syncUi: true });
   }
 
   function collectConversationTurns() {
@@ -1178,20 +1437,26 @@
       ...Array.from(scopedNodes),
       ...Array.from(allNodes)
     ]).filter(isLikelyMessageNode);
+    state.primarySelectorHits = uniqueNodes.length;
+    state.fallbackSelectorHits = 0;
     const signatureCountMap = new Map();
     const turns = uniqueNodes.map((node) => parseMessage(node, signatureCountMap)).filter(Boolean);
     if (turns.length) {
       state.parseMode = 'normal';
+      state.selectorMode = 'primary';
       return turns;
     }
 
     const fallbackTurns = collectFallbackTurns(root);
     if (fallbackTurns.length) {
       state.parseMode = 'fallback';
+      state.selectorMode = 'fallback';
+      state.fallbackSelectorHits = fallbackTurns.length;
       return fallbackTurns;
     }
 
     state.parseMode = 'normal';
+    state.selectorMode = 'primary';
     return [];
   }
 
@@ -1251,7 +1516,7 @@
     if (!text) return [];
 
     const markdown = text.replace(/\n{3,}/g, '\n\n');
-    const fallbackId = `ced-fallback-${hashString(`${SITE_KEY}-${normalizeSignatureText(text)}`)}`;
+    const fallbackId = ensureStableMessageId(root, 'assistant', `${SITE_KEY}:${getSelectionContextKey()}:fallback`);
     return [{
       id: fallbackId,
       role: 'assistant',
@@ -1305,10 +1570,13 @@
       images,
       attachments
     });
-    const occurrence = signatureCountMap.get(baseSignature) || 0;
-    signatureCountMap.set(baseSignature, occurrence + 1);
-    const messageId = `${baseSignature}-${occurrence}`;
-    node.dataset.cedMessageId = messageId;
+    let occurrence = 0;
+    if (signatureCountMap instanceof Map) {
+      occurrence = signatureCountMap.get(baseSignature) || 0;
+      signatureCountMap.set(baseSignature, occurrence + 1);
+    }
+    const identitySignature = occurrence > 0 ? `${baseSignature}#${occurrence}` : baseSignature;
+    const messageId = ensureStableMessageId(node, role, identitySignature);
 
     const turn = {
       id: messageId,
@@ -1320,7 +1588,8 @@
       images,
       attachments,
       formulas,
-      preview: text.slice(0, 100)
+      preview: text.slice(0, 100),
+      signature: identitySignature,
     };
 
     turn.markdownResolved = markdown;
@@ -1422,9 +1691,19 @@
     const matched = contentSelector ? node.querySelector(contentSelector) : null;
     if (matched) return matched;
 
-    if (SITE_KEY === SITE_KEYS.chatgpt && role === 'user') {
-      const userMessageRoot = node.querySelector('[data-message-author-role="user"]');
-      return userMessageRoot || node;
+    if (SITE_KEY === SITE_KEYS.chatgpt) {
+      const scopedContent = node.querySelector('[data-message-content]');
+      if (scopedContent instanceof HTMLElement) {
+        return scopedContent;
+      }
+      if (role === 'user') {
+        const userMessageRoot = node.querySelector('[data-message-author-role="user"]');
+        return userMessageRoot || node;
+      }
+      if (role === 'assistant') {
+        const assistantRoot = node.querySelector('[data-message-author-role="assistant"]');
+        return assistantRoot || node;
+      }
     }
 
     if (SITE_KEY === SITE_KEYS.gemini) {
@@ -1566,6 +1845,10 @@
     return value === true;
   }
 
+  function normalizeExportRenderScope(value) {
+    return value === 'full' ? 'full' : 'window';
+  }
+
   function normalizeContextSyncEnabled(value) {
     return value === true;
   }
@@ -1585,6 +1868,97 @@
   function getCurrentConversationId() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return '';
     return extractConversationIdFromUrl(location.pathname) || extractConversationIdFromUrl(location.href);
+  }
+
+  function getSelectionContextKey() {
+    const conversationId = getCurrentConversationId();
+    if (conversationId) {
+      return `${SITE_KEY}:${conversationId}`;
+    }
+    return `${SITE_KEY}:${location.pathname || location.href}`;
+  }
+
+  function syncSelectionContext() {
+    const nextKey = getSelectionContextKey();
+    if (state.selectionContextKey === nextKey) return;
+    state.selectionContextKey = nextKey;
+    state.selectedTurnIds = new Set();
+    state.selectionMode = 'auto';
+  }
+
+  function normalizeSelectionMode(mode, turnCount = getTurnsForPanel().length, selectedCount = state.selectedTurnIds.size) {
+    const total = Math.max(0, Number(turnCount) || 0);
+    const selected = Math.max(0, Number(selectedCount) || 0);
+    if (mode === 'auto') {
+      return total > 0 ? 'all' : 'auto';
+    }
+    if (total <= 0) {
+      return mode === 'auto' ? 'auto' : (mode || 'none');
+    }
+    if (selected === 0) return 'none';
+    if (selected >= total) return 'all';
+    return 'custom';
+  }
+
+  function commitSelection(nextSelection, mode = '', turnCount = getTurnsForPanel().length) {
+    state.selectedTurnIds = nextSelection instanceof Set ? new Set(nextSelection) : new Set(nextSelection || []);
+    state.selectionMode = normalizeSelectionMode(mode || state.selectionMode, turnCount, state.selectedTurnIds.size);
+  }
+
+  function getStableNodeToken(node) {
+    if (!(node instanceof HTMLElement)) return '';
+    const explicitTokens = [
+      ['data-message-id', node.getAttribute('data-message-id') || ''],
+      ['data-turn', node.getAttribute('data-turn') || ''],
+      ['data-testid', node.getAttribute('data-testid') || ''],
+      ['id', node.getAttribute('id') || ''],
+    ];
+
+    for (const [kind, value] of explicitTokens) {
+      const normalized = String(value || '').trim();
+      if (!normalized) continue;
+      if (kind === 'data-testid' && !/(conversation-turn|message|chat)/i.test(normalized)) {
+        continue;
+      }
+      return `${kind}:${normalized}`;
+    }
+
+    const role = resolveRoleFromMetadata(node) || 'message';
+    const contentRoot = node.querySelector('[data-message-content]') || node;
+    const text = normalizeSignatureText(contentRoot.textContent || '').slice(0, 240);
+    if (text) {
+      return `content:${role}:${hashString(text)}`;
+    }
+
+    return '';
+  }
+
+  function ensureStableMessageId(node, role = '', fallbackSignature = '') {
+    if (!(node instanceof HTMLElement)) {
+      return fallbackSignature ? `ced-${SITE_KEY}-${hashString(fallbackSignature)}` : `ced-${SITE_KEY}-message`;
+    }
+
+    if (node.dataset.cedMessageId) {
+      node.dataset.cedMessageRoot = '1';
+      return node.dataset.cedMessageId;
+    }
+
+    const stableToken = getStableNodeToken(node);
+    let nextId = '';
+    if (stableToken) {
+      nextId = `ced-${SITE_KEY}-${hashString(stableToken)}`;
+    } else if (fallbackSignature) {
+      nextId = `ced-${SITE_KEY}-${hashString(fallbackSignature)}`;
+    } else {
+      state.messageIdSequence += 1;
+      const sequence = state.messageIdSequence.toString(36);
+      const roleToken = role === 'user' || role === 'assistant' ? role : 'message';
+      nextId = `ced-${SITE_KEY}-${roleToken}-${sequence}`;
+    }
+
+    node.dataset.cedMessageId = nextId;
+    node.dataset.cedMessageRoot = '1';
+    return nextId;
   }
 
   function collectSidebarConversations() {
@@ -1618,6 +1992,251 @@
     });
 
     return list;
+  }
+
+  function initRuntimeScheduler() {
+    if (runtimeScheduler || !window.__cedRuntimeScheduler?.create) return;
+    runtimeScheduler = window.__cedRuntimeScheduler.create({
+      onAnimationFlush: handleSchedulerAnimationFlush,
+      onIdleFlush: handleSchedulerIdleFlush,
+    });
+  }
+
+  function initConversationKernel() {
+    if (!window.__cedConversationKernel?.create) return;
+    if (!conversationKernel) {
+      conversationKernel = window.__cedConversationKernel.create({
+        siteKey: SITE_KEY,
+        focusRound: (id) => focusHistoryRound(id, { source: 'kernel' }),
+        applyLatestWindow: () => applyLatestHistoryWindow({
+          keepRounds: state.historyCleanerKeepRounds,
+          anchorMarkerId: state.historyArchiveActiveMarkerId || state.historyArchiveOpenMarkerId || '',
+        }),
+        exportSnapshot: (scope) => getKernelExportTurns(scope),
+        cloneTurn: (turn) => cloneTurnForHistoryRound(turn),
+        measureRound: (round, existingRound) => {
+          const measured = measureHistoryRoundHeight(round);
+          if (measured > 0) return measured;
+          return Math.max(0, Number(existingRound?.measuredHeight) || 0);
+        },
+      });
+    }
+    conversationKernel.initialize({
+      siteKey: SITE_KEY,
+      cloneTurn: (turn) => cloneTurnForHistoryRound(turn),
+      measureRound: (round, existingRound) => {
+        const measured = measureHistoryRoundHeight(round);
+        if (measured > 0) return measured;
+        return Math.max(0, Number(existingRound?.measuredHeight) || 0);
+      },
+    });
+  }
+
+  function initHistoryWindowManager() {
+    if (!window.__cedHistoryWindowManager?.create) return;
+    const options = {
+      state,
+      kernel: conversationKernel,
+      focusRadius: HISTORY_FOCUS_RADIUS,
+      ensureArchivePool: () => ensureHistoryArchivePool(),
+      measureRoundHeight: (round) => measureHistoryRoundHeight(round),
+      resolveCollectionRoot: () => resolveCollectionRoot(),
+      resolveScrollContainer: () => queryFirst(SCROLL_CONTAINER_SELECTORS) || document.scrollingElement || document.documentElement || document.body,
+      getConversationObserveTarget: () => getConversationObserveTarget(),
+      muteConversationObserverFor: (durationMs) => muteConversationObserverFor(durationMs),
+      queueEnhancerRoots: (nodes) => queueEnhancerRoots(nodes),
+      requestFocusReload: (markerId) => requestHistoryFocusReload(markerId),
+      normalizeKeepRounds: (value) => normalizeHistoryCleanerKeepRounds(value),
+      scheduleTimelineRefresh: () => scheduleTimelineRefresh(),
+    };
+    if (!historyWindowManager) {
+      historyWindowManager = window.__cedHistoryWindowManager.create(options);
+      return;
+    }
+    historyWindowManager.initialize(options);
+  }
+
+  function initHistoryArchiveController() {
+    if (!window.__cedHistoryArchiveController?.create) return;
+    const options = {
+      siteKey: SITE_KEY,
+      state,
+      historyFocusReloadKey: HISTORY_FOCUS_RELOAD_KEY,
+      getConversationKey: () => getHistoryArchiveConversationKey(),
+      normalizeKeepRounds: (value) => normalizeHistoryCleanerKeepRounds(value),
+      getTurnsFromRounds: () => collectTurnsFromHistoryRounds(),
+      applyLatestWindow: (windowOptions) => historyWindowManager?.applyLatestWindow?.(windowOptions)
+        || { archivedRounds: 0, restoredRounds: 0, liveRounds: 0 },
+      focusRound: (markerId, focusOptions) => historyWindowManager?.focusRound?.(markerId, focusOptions) || null,
+      requestRefresh: () => refreshConversationSnapshot({ full: false, reason: 'history-archive-sync', syncUi: true }),
+      shouldRunHeavyRefresh: () => shouldRunHeavyRefresh(),
+      clearPendingHeavyRefresh: () => {
+        if (state.heavyRefreshTimer) {
+          clearTimeout(state.heavyRefreshTimer);
+          state.heavyRefreshTimer = null;
+        }
+      },
+      scheduleTimelineRefresh: () => scheduleTimelineRefresh(),
+      scheduleTimelineEnsure: (delay) => scheduleTimelineEnsure(delay),
+      isTimelineMounted: () => document.querySelector('.ced-timeline-bar') instanceof HTMLElement,
+      muteConversationObserverFor: (durationMs) => muteConversationObserverFor(durationMs),
+    };
+    if (!historyArchiveController) {
+      historyArchiveController = window.__cedHistoryArchiveController.create(options);
+      return;
+    }
+    historyArchiveController.initialize(options);
+  }
+
+  function initChatGptConversationParser() {
+    if (!window.__cedChatGptConversationParser?.create) return;
+    const options = {
+      state,
+      messageSelector: SELECTORS.MESSAGE_TURN,
+      primaryRootSelector: '[data-testid^="conversation-turn-"]',
+      fallbackRootSelector: '[data-message-author-role]',
+      fastSelector: '[data-testid^="conversation-turn-"]',
+      dedupeNodes: (nodes) => dedupeMessageNodes(nodes),
+      syncArchiveContext: () => syncHistoryArchiveContext(),
+      collectDomTurns: () => collectConversationTurns(),
+      collectArchiveTurns: () => collectTurnsFromHistoryRounds(),
+      syncRoundStore: (turns) => syncHistoryRoundStore(turns),
+      applyLatestWindow: (windowOptions) => applyLatestHistoryWindow(windowOptions),
+    };
+    if (!chatgptConversationParser) {
+      chatgptConversationParser = window.__cedChatGptConversationParser.create(options);
+      return;
+    }
+    chatgptConversationParser.initialize(options);
+  }
+
+  function initExportEngine() {
+    if (!window.__cedExportEngine?.create) return;
+    if (!exportEngine) {
+      exportEngine = window.__cedExportEngine.create({
+        buildHtmlDocument: (turns, options) => buildFullHtmlDocument(turns, options),
+        renderCanvas: (turns, options) => renderConversationCanvas(turns, options),
+      });
+      return;
+    }
+    exportEngine.configure({
+      buildHtmlDocument: (turns, options) => buildFullHtmlDocument(turns, options),
+      renderCanvas: (turns, options) => renderConversationCanvas(turns, options),
+    });
+  }
+
+  function handleSchedulerAnimationFlush(keys = []) {
+    const queue = new Set(keys);
+    if (queue.has('timeline-ensure')) {
+      ensureTimelineMounted();
+    }
+    if (queue.has('conversation-sync')) {
+      refreshConversationSnapshot({ full: false, reason: 'scheduler-live', syncUi: true })
+        .catch((error) => console.warn('[ThreadAtlas] conversation snapshot refresh failed:', error));
+    }
+    if (queue.has('timeline-refresh') && !queue.has('conversation-sync')) {
+      refreshTimelineFeature();
+    }
+    if (queue.has('enhancers-refresh')) {
+      flushPendingEnhancerRoots();
+    }
+    if (queue.has('conversation-sync') && SITE_KEY === SITE_KEYS.chatgpt) {
+      scheduleHistoryArchiveSync(document.hidden ? 220 : 80);
+    }
+    if (queue.has('conversation-sync') && state.timelineEnabled) {
+      ensureTimelineMounted();
+    }
+  }
+
+  function handleSchedulerIdleFlush(keys = []) {
+    const queue = new Set(keys);
+    if (queue.has('meta-refresh')) {
+      refreshConversationMetaOnly();
+    }
+    if (queue.has('snapshot-warmup')) {
+      scheduleFullSnapshotWarmup(0);
+    }
+    if (queue.has('heavy-refresh')) {
+      refreshConversationMetaOnly();
+      refreshConversationSnapshot({ full: true, reason: 'forced-full', force: true, syncUi: true })
+        .catch((error) => console.warn('[ThreadAtlas] full snapshot refresh failed:', error));
+    }
+  }
+
+  function queueEnhancerRoot(root) {
+    if (!(root instanceof HTMLElement)) return;
+    if (isCedUiElement(root)) return;
+    state.pendingEnhancerRoots.add(root);
+  }
+
+  function queueEnhancerRoots(nodes = []) {
+    nodes.forEach((node) => {
+      if (!(node instanceof HTMLElement)) return;
+      const root = node.matches?.(SELECTORS.MESSAGE_TURN)
+        ? node
+        : (node.closest?.(SELECTORS.MESSAGE_TURN)
+          || node.querySelector?.(SELECTORS.MESSAGE_TURN)
+          || null);
+      if (root instanceof HTMLElement) {
+        queueEnhancerRoot(root);
+      }
+    });
+    if (!state.pendingEnhancerRoots.size) return;
+    if (runtimeScheduler) {
+      runtimeScheduler.markDirty('enhancers-refresh');
+      return;
+    }
+    flushPendingEnhancerRoots();
+  }
+
+  function flushPendingEnhancerRoots() {
+    if (!state.pendingEnhancerRoots.size) return;
+    const roots = Array.from(state.pendingEnhancerRoots)
+      .filter((node) => node instanceof HTMLElement && node.isConnected);
+    state.pendingEnhancerRoots.clear();
+    roots.forEach((root) => {
+      window.__cedFormulaCopy?.refresh?.(root);
+      if (state.markdownPatcherEnabled) {
+        window.__cedMarkdownPatcher?.refresh?.(root);
+      }
+    });
+  }
+
+  function getKernelExportTurns(scope = 'full') {
+    if (scope === 'window') {
+      if (SITE_KEY === SITE_KEYS.chatgpt && state.historyArchiveRounds.length) {
+        return state.historyArchiveRounds
+          .filter((round) => round.live === true)
+          .flatMap((round) => round.turns.map((turn) => ({
+            ...turn,
+            roundId: round.markerId,
+            roundIndex: round.roundIndex,
+            node: turn.node instanceof HTMLElement ? turn.node : getHistoryRoundAnchorNode(round),
+            archived: false,
+            restored: round.wasArchived === true,
+          })));
+      }
+      return state.liveTurns.filter((turn) => turn.node instanceof HTMLElement && !turn.node.classList.contains('ced-archive-placeholder'));
+    }
+    return state.fullTurns.length ? state.fullTurns.slice() : getTurnsForPanel().slice();
+  }
+
+  function getDiagnosticsSnapshot() {
+    const kernelDiagnostics = conversationKernel?.getDiagnostics?.() || {};
+    return {
+      ...kernelDiagnostics,
+      siteKey: SITE_KEY,
+      currentUrl: location.href,
+      timelineEnabled: state.timelineEnabled,
+      exportRenderScope: state.exportRenderScope,
+      fullSnapshotReady: state.fullSnapshotReady,
+      fullSnapshotDirty: state.fullSnapshotDirty,
+      fullSnapshotContextKey: state.fullSnapshotContextKey,
+      liveTurnCount: state.liveTurns.length,
+      fullTurnCount: state.fullTurns.length,
+      conversationStructureVersion: state.conversationStructureVersion,
+      metaVersion: state.metaVersion,
+    };
   }
 
   function initFormulaCopyFeature() {
@@ -1659,7 +2278,7 @@
       window.__cedTimeline.initialize({
         enabled: state.timelineEnabled,
         markerRole: 'user',
-        maxMarkers: 320,
+        maxMarkers: 0,
         shortcutEnabled: true,
         previewEnabled: true,
         exportQuickEnabled: true,
@@ -1701,8 +2320,22 @@
     window.__cedTimeline?.refresh?.();
   }
 
+  function invalidateTimelineMarkerTopsFromRound(markerId = '') {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (!markerId) {
+      window.__cedTimeline?.invalidateMarkerTopsFrom?.(0);
+      return;
+    }
+    window.__cedTimeline?.invalidateMarkerTopsFromMarkerId?.(markerId);
+  }
+
   function scheduleTimelineRefresh() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (!state.timelineEnabled) return;
+    if (runtimeScheduler) {
+      runtimeScheduler.markDirty('timeline-refresh');
+      return;
+    }
     if (state.timelineRefreshTimer) {
       clearTimeout(state.timelineRefreshTimer);
     }
@@ -1737,6 +2370,10 @@
 
   function scheduleTimelineEnsure(delay = 400) {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    if (runtimeScheduler && delay <= 0) {
+      runtimeScheduler.markDirty('timeline-ensure');
+      return;
+    }
     if (state.timelineEnsureTimer) {
       clearTimeout(state.timelineEnsureTimer);
     }
@@ -1759,14 +2396,6 @@
 
     document.addEventListener('visibilitychange', ensureVisibleSoon, { passive: true });
     window.addEventListener('resize', ensureVisibleSoon, { passive: true });
-
-    if (state.timelineWatchTimer) {
-      clearInterval(state.timelineWatchTimer);
-    }
-    state.timelineWatchTimer = setInterval(() => {
-      if (!state.timelineEnabled) return;
-      ensureTimelineMounted();
-    }, 1200);
   }
 
   function scheduleHeavyRefresh(delay = 720) {
@@ -1775,7 +2404,8 @@
     }
     state.heavyRefreshTimer = setTimeout(() => {
       state.heavyRefreshTimer = null;
-      refreshConversationData();
+      refreshConversationMetaOnly();
+      scheduleFullSnapshotWarmup(0);
     }, Math.max(0, delay));
   }
 
@@ -1787,35 +2417,112 @@
     return state.exporting || isExportPanelOpen();
   }
 
-  function refreshPageMetaOnly() {
+  function refreshConversationMetaOnly() {
     state.pageTitle = detectConversationTitle();
+    state.metaVersion += 1;
     if (state.nameInput) {
       state.nameInput.placeholder = state.pageTitle || ACTIVE_SITE.defaultTitle;
     }
     refreshFolderFeature();
     refreshTitleUpdaterFeature();
+    refreshPanelOverview();
+    refreshActionSection();
+  }
+
+  function refreshPageMetaOnly() {
+    refreshConversationMetaOnly();
+  }
+
+  function cancelFullSnapshotWarmup() {
+    if (state.fullSnapshotWarmTimer) {
+      clearTimeout(state.fullSnapshotWarmTimer);
+      state.fullSnapshotWarmTimer = null;
+    }
+    if (state.fullSnapshotWarmIdleHandle) {
+      if (typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(state.fullSnapshotWarmIdleHandle);
+      } else {
+        clearTimeout(state.fullSnapshotWarmIdleHandle);
+      }
+      state.fullSnapshotWarmIdleHandle = null;
+    }
+  }
+
+  function scheduleFullSnapshotWarmup(delay = 80) {
+    cancelFullSnapshotWarmup();
+    state.fullSnapshotWarmTimer = setTimeout(() => {
+      state.fullSnapshotWarmTimer = null;
+
+      const run = async () => {
+        state.fullSnapshotWarmIdleHandle = null;
+        if (state.fullSnapshotInFlight) return;
+        if (!state.fullSnapshotDirty && state.fullSnapshotContextKey === getSelectionContextKey()) return;
+
+        state.fullSnapshotInFlight = true;
+        try {
+          refreshConversationMetaOnly();
+          await refreshConversationSnapshot({
+            full: true,
+            reason: 'warmup',
+            syncUi: isExportPanelOpen() || state.exporting,
+          });
+        } finally {
+          state.fullSnapshotInFlight = false;
+        }
+      };
+
+      if (typeof window.requestIdleCallback === 'function') {
+        state.fullSnapshotWarmIdleHandle = window.requestIdleCallback(run, { timeout: document.hidden ? 1600 : 1200 });
+      } else {
+        run();
+      }
+    }, Math.max(0, delay));
   }
 
   function scheduleMetaRefresh(delay = 240) {
     if (state.metaRefreshTimer) {
       clearTimeout(state.metaRefreshTimer);
     }
+    if (state.metaRefreshIdleHandle && typeof window.cancelIdleCallback === 'function') {
+      window.cancelIdleCallback(state.metaRefreshIdleHandle);
+      state.metaRefreshIdleHandle = null;
+    }
     state.metaRefreshTimer = setTimeout(() => {
       state.metaRefreshTimer = null;
-      refreshPageMetaOnly();
+      const run = () => {
+        state.metaRefreshIdleHandle = null;
+        refreshConversationMetaOnly();
+      };
+      if (typeof window.requestIdleCallback === 'function') {
+        state.metaRefreshIdleHandle = window.requestIdleCallback(run, { timeout: 420 });
+        return;
+      }
+      run();
     }, Math.max(0, delay));
   }
 
   function collectConversationTurnNodesFast() {
-    syncHistoryArchiveContext();
     if (SITE_KEY !== SITE_KEYS.chatgpt) return [];
-    const fastNodes = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'))
+    if (chatgptConversationParser?.collectTurnNodesFast) {
+      return dedupeMessageNodes(chatgptConversationParser.collectTurnNodesFast() || [])
+        .filter((node) => node instanceof HTMLElement);
+    }
+    syncHistoryArchiveContext();
+    const fastSelector = '[data-message-author-role], article[data-turn], [data-testid^="conversation-turn-"], [data-testid*="conversation-turn"]';
+    const fastNodes = dedupeMessageNodes(Array.from(document.querySelectorAll(fastSelector)))
       .filter((node) => node instanceof HTMLElement);
-    return (fastNodes.length ? fastNodes : dedupeMessageNodes(Array.from(document.querySelectorAll(SELECTORS.MESSAGE_TURN))))
+    if (fastNodes.length) {
+      return fastNodes;
+    }
+    return dedupeMessageNodes(Array.from(document.querySelectorAll(SELECTORS.MESSAGE_TURN)))
       .filter((node) => node instanceof HTMLElement);
   }
 
   function collectConversationTurnsForChatGpt() {
+    if (chatgptConversationParser?.parseConversation) {
+      const parsed = chatgptConversationParser.parseConversation() || [];
+      if (parsed.length) return parsed;
+    }
     const domTurns = collectConversationTurns();
     if (!domTurns.length) {
       return collectTurnsFromHistoryRounds();
@@ -1824,18 +2531,23 @@
     if (state.historyCleanerAutoMaintain && state.historyArchiveWindowMode === 'latest') {
       applyLatestHistoryWindow({
         keepRounds: state.historyCleanerKeepRounds,
-        anchorMarkerId: state.historyArchiveOpenMarkerId || ''
+        anchorMarkerId: state.historyArchiveOpenMarkerId || '',
       });
     }
-    return collectTurnsFromHistoryRounds();
+    const archiveTurns = collectTurnsFromHistoryRounds();
+    return archiveTurns.length ? archiveTurns : domTurns;
   }
 
   function collectTimelineTurnsFast() {
     syncHistoryArchiveContext();
-    if (SITE_KEY === SITE_KEYS.chatgpt && state.historyArchiveRounds.length) {
-      const turns = state.historyArchiveRounds
+    const kernelRounds = conversationKernel?.getRounds?.() || [];
+    if (SITE_KEY === SITE_KEYS.chatgpt && kernelRounds.length) {
+      const turns = kernelRounds
         .map((round) => {
-          const anchor = getHistoryRoundAnchorNode(round);
+          const liveRound = findHistoryRoundById(round.markerId) || round;
+          const anchor = liveRound.node instanceof HTMLElement
+            ? liveRound.node
+            : getHistoryRoundAnchorNode(liveRound);
           if (!(anchor instanceof HTMLElement)) return null;
           return {
             id: round.markerId,
@@ -1872,11 +2584,9 @@
       const role = detectNodeRole(node);
       const contentNode = resolveContentNode(node, role) || node;
       const text = getTimelineSummaryText(contentNode);
-      const id = node.dataset.cedMessageId
-        || node.getAttribute('data-testid')
-        || `timeline-${index}`;
+      const id = ensureStableMessageId(node, role, `${SITE_KEY}:timeline:${index}`);
       return {
-        id: `${id}-${index}`,
+        id,
         role,
         node,
         text,
@@ -1914,11 +2624,9 @@
     const nodes = collectConversationTurnNodesFast();
     return nodes.map((node, index) => {
       const role = detectNodeRole(node);
-      const id = node.dataset.cedMessageId
-        || node.getAttribute('data-testid')
-        || `history-${index}`;
+      const id = ensureStableMessageId(node, role, `${SITE_KEY}:history:${index}`);
       return {
-        id: `${id}-${index}`,
+        id,
         role,
         node,
       };
@@ -1932,43 +2640,11 @@
   }
 
   function syncHistoryArchiveContext() {
-    const nextKey = getHistoryArchiveConversationKey();
-    if (state.historyArchiveConversationKey === nextKey) {
-      return;
-    }
-    clearHistoryArchive();
-    state.historyArchiveConversationKey = nextKey;
+    historyArchiveController?.syncContext?.();
   }
 
   function clearHistoryArchive() {
-    state.historyArchiveRounds.forEach((round) => {
-      if (round?.placeholderEl instanceof HTMLElement && round.placeholderEl.isConnected) {
-        round.placeholderEl.remove();
-      }
-      if (round?.spacerEl instanceof HTMLElement && round.spacerEl.isConnected) {
-        round.spacerEl.remove();
-      }
-    });
-    state.historyArchiveRounds = [];
-    if (state.historyArchivePoolEl instanceof HTMLElement) {
-      state.historyArchivePoolEl.replaceChildren();
-    }
-    state.historyArchiveVersion += 1;
-    state.historyArchiveOpenMarkerId = '';
-    state.historyArchiveWindowMode = 'latest';
-    state.historyArchiveWindowStart = 0;
-    state.historyArchiveWindowEnd = -1;
-    state.historyArchiveIndexReady = false;
-    state.historyArchiveActiveMarkerId = '';
-    if (state.historyArchiveFocusTimer) {
-      clearTimeout(state.historyArchiveFocusTimer);
-      state.historyArchiveFocusTimer = null;
-    }
-    if (state.historyArchiveSyncTimer) {
-      clearTimeout(state.historyArchiveSyncTimer);
-      state.historyArchiveSyncTimer = null;
-    }
-    state.timelineTurnsCache = { signature: '', turns: [] };
+    historyArchiveController?.clearArchive?.();
   }
 
   function estimateElementOuterHeight(element) {
@@ -2000,35 +2676,15 @@
   }
 
   function groupTurnsIntoHistoryRounds(turns = []) {
-    const groups = [];
-    let current = [];
-    turns.forEach((turn) => {
-      if (!turn) return;
-      const role = turn.role === 'user' ? 'user' : 'assistant';
-      if (!current.length || role === 'user') {
-        if (current.length) {
-          groups.push(current);
-        }
-        current = [turn];
-        return;
-      }
-      current.push(turn);
-    });
-    if (current.length) {
-      groups.push(current);
-    }
-    return groups;
+    return conversationKernel?.groupTurnsIntoRounds?.(turns) || [];
   }
 
   function buildHistoryRoundSummary(group = [], index = 0) {
-    const preferred = group.find((turn) => turn.role === 'user') || group[0];
-    return preferred?.preview || preferred?.text || `第 ${index + 1} 轮`;
+    return conversationKernel?.buildRoundSummary?.(group, index) || `第 ${index + 1} 轮`;
   }
 
   function buildHistoryRoundMarkerId(group = [], index = 0, existingRound = null) {
-    if (existingRound?.markerId) return existingRound.markerId;
-    const preferred = group.find((turn) => turn.role === 'user') || group[0];
-    return preferred?.id || `ced-round-${index}`;
+    return conversationKernel?.buildRoundMarkerId?.(group, index, existingRound) || `ced-round-${index}`;
   }
 
   function measureHistoryRoundHeight(round) {
@@ -2044,425 +2700,159 @@
   }
 
   function createHistoryRoundRecord(group = [], index = 0, existingRound = null) {
-    const markerId = buildHistoryRoundMarkerId(group, index, existingRound);
-    const turns = group.map((turn) => {
-      const cloned = cloneTurnForHistoryRound(turn);
-      cloned.roundId = markerId;
-      cloned.roundIndex = index;
-      if (cloned.node instanceof HTMLElement) {
-        cloned.node.dataset.cedRoundMarkerId = markerId;
-      }
-      return cloned;
-    });
-    const domNodes = turns
-      .map((turn) => turn.node)
-      .filter((node) => node instanceof HTMLElement);
-
-    const round = {
-      markerId,
-      roundIndex: index,
-      role: group.some((turn) => turn.role === 'user') ? 'user' : (group[0]?.role || 'assistant'),
-      summary: buildHistoryRoundSummary(group, index),
-      turns,
-      domNodes,
-      spacerEl: existingRound?.spacerEl || null,
-      live: domNodes.some((node) => node.isConnected),
-      wasArchived: existingRound?.wasArchived === true,
-      measuredHeight: 0,
-      restoring: false,
-    };
-    round.measuredHeight = measureHistoryRoundHeight(round) || Math.max(0, Number(existingRound?.measuredHeight) || 0);
-    return round;
-  }
-
-  function buildHistoryRoundsFromTurns(turns = [], existingRounds = []) {
-    return groupTurnsIntoHistoryRounds(turns)
-      .map((group, index) => createHistoryRoundRecord(group, index, existingRounds[index] || null));
-  }
-
-  function renumberHistoryRounds(startIndex = 0) {
-    const start = Math.max(0, Number(startIndex) || 0);
-    for (let index = start; index < state.historyArchiveRounds.length; index += 1) {
-      const round = state.historyArchiveRounds[index];
-      if (!round) continue;
-      round.roundIndex = index;
-      round.turns.forEach((turn) => {
-        turn.roundId = round.markerId;
-        turn.roundIndex = index;
-        if (turn.node instanceof HTMLElement) {
-          turn.node.dataset.cedRoundMarkerId = round.markerId;
-        }
-      });
-      if (round.spacerEl instanceof HTMLElement) {
-        round.spacerEl.dataset.markerId = round.markerId;
-      }
-    }
-  }
-
-  function collectTurnsFromHistoryRounds() {
-    if (!state.historyArchiveRounds.length) return [];
-    return state.historyArchiveRounds.flatMap((round) => round.turns.map((turn) => ({
-      ...turn,
-      roundId: round.markerId,
-      roundIndex: round.roundIndex,
-      node: turn.node instanceof HTMLElement ? turn.node : getHistoryRoundAnchorNode(round),
-      archived: round.live !== true && round.wasArchived === true,
-      restored: round.live === true && round.wasArchived === true,
-      preview: turn.preview || round.summary || '',
-    })));
-  }
-
-  function getHistoryRoundAnchorNode(round) {
-    if (!round) return null;
-    const liveNode = Array.isArray(round.domNodes)
-      ? round.domNodes.find((node) => node instanceof HTMLElement && node.isConnected)
-      : null;
-    if (liveNode instanceof HTMLElement) {
-      round.live = true;
-      return liveNode;
-    }
-    if (round.spacerEl instanceof HTMLElement) {
-      round.live = false;
-      return round.spacerEl;
+    if (conversationKernel?.createRoundRecord) {
+      return conversationKernel.createRoundRecord(group, index, existingRound);
     }
     return null;
   }
 
+  function buildHistoryRoundsFromTurns(turns = [], existingRounds = []) {
+    return conversationKernel?.buildRounds?.(turns, existingRounds) || [];
+  }
+
+  function renumberHistoryRounds(startIndex = 0) {
+    state.historyArchiveRounds = conversationKernel?.renumberRounds?.(state.historyArchiveRounds, startIndex)
+      || state.historyArchiveRounds;
+  }
+
+  function collectTurnsFromHistoryRounds() {
+    if (!state.historyArchiveRounds.length) return [];
+    return conversationKernel?.flattenTurns?.(state.historyArchiveRounds, getHistoryRoundAnchorNode) || [];
+  }
+
+  function getKernelRoundsSnapshot() {
+    if (SITE_KEY === SITE_KEYS.chatgpt && state.historyArchiveRounds.length) {
+      return conversationKernel?.buildRoundSnapshots?.(state.historyArchiveRounds, getHistoryRoundAnchorNode) || [];
+    }
+    const kernelTurns = state.liveTurns.length ? state.liveTurns : state.turns;
+    const ephemeralRounds = conversationKernel?.buildRounds?.(kernelTurns, []) || [];
+    return conversationKernel?.buildRoundSnapshots?.(ephemeralRounds, (round) => round.domNodes?.[0] || null) || [];
+  }
+
+  function getHistoryRoundAnchorNode(round) {
+    return historyWindowManager?.getAnchorNode?.(round) || null;
+  }
+
   function findHistoryRoundById(markerId = '') {
-    if (!markerId) return null;
-    return state.historyArchiveRounds.find((round) => round?.markerId === markerId) || null;
+    return conversationKernel?.findRoundByIdIn?.(state.historyArchiveRounds, markerId) || null;
   }
 
   function createHistoryRoundSpacer(round) {
-    const spacer = document.createElement('div');
-    spacer.className = 'ced-archive-placeholder ced-archive-placeholder--spacer';
-    spacer.dataset.markerId = round.markerId;
-    spacer.dataset.archived = '1';
-    spacer.setAttribute('aria-hidden', 'true');
-    round.spacerEl = spacer;
-    updateHistoryRoundSpacer(round);
-    return spacer;
+    return historyWindowManager?.createSpacer?.(round) || null;
   }
 
   function ensureHistoryRoundSpacer(round) {
-    if (!(round?.spacerEl instanceof HTMLElement)) {
-      return createHistoryRoundSpacer(round);
-    }
-    updateHistoryRoundSpacer(round);
-    return round.spacerEl;
+    return historyWindowManager?.ensureSpacer?.(round) || null;
   }
 
   function updateHistoryRoundSpacer(round) {
-    if (!round) return;
-    const spacer = ensureHistoryRoundSpacer(round);
-    const height = Math.max(24, Math.round(round.measuredHeight || 24));
-    spacer.dataset.markerId = round.markerId;
-    spacer.classList.toggle('is-live', round.live === true);
-    spacer.classList.toggle('is-restored', round.wasArchived === true && round.live === true);
-    spacer.classList.toggle('is-restoring', round.restoring === true);
-    spacer.style.height = round.live === true ? '0px' : `${height}px`;
-    spacer.style.minHeight = round.live === true ? '0px' : `${height}px`;
+    historyWindowManager?.updateSpacer?.(round);
   }
 
   function archiveHistoryRound(round) {
-    if (!round || round.live !== true) return false;
-    const connectedNodes = round.domNodes.filter((node) => node instanceof HTMLElement && node.isConnected);
-    if (!connectedNodes.length) {
-      round.live = false;
-      round.wasArchived = true;
-      updateHistoryRoundSpacer(round);
-      return false;
-    }
-
-    round.measuredHeight = measureHistoryRoundHeight(round) || round.measuredHeight;
-    const spacer = ensureHistoryRoundSpacer(round);
-    connectedNodes[0].before(spacer);
-
-    const pool = ensureHistoryArchivePool();
-    const frag = document.createDocumentFragment();
-    round.domNodes.forEach((node) => {
-      if (node instanceof HTMLElement) {
-        frag.appendChild(node);
-      }
-    });
-    pool.appendChild(frag);
-    round.live = false;
-    round.wasArchived = true;
-    round.restoring = false;
-    updateHistoryRoundSpacer(round);
-    return true;
+    return historyWindowManager?.archiveRound?.(round) || false;
   }
 
   function restoreHistoryRound(round) {
-    if (!round) return false;
-    if (round.live === true) {
-      round.measuredHeight = measureHistoryRoundHeight(round) || round.measuredHeight;
-      updateHistoryRoundSpacer(round);
-      return false;
-    }
-
-    const spacer = ensureHistoryRoundSpacer(round);
-    if (!spacer.isConnected) {
-      const nextAnchor = state.historyArchiveRounds
-        .slice(round.roundIndex + 1)
-        .map((item) => getHistoryRoundAnchorNode(item))
-        .find((node) => node instanceof HTMLElement && node.isConnected);
-      if (nextAnchor instanceof HTMLElement) {
-        nextAnchor.before(spacer);
-      } else {
-        const container = resolveCollectionRoot()
-          || getConversationObserveTarget()
-          || document.querySelector('main');
-        container?.appendChild(spacer);
-      }
-    }
-    const frag = document.createDocumentFragment();
-    round.domNodes.forEach((node) => {
-      if (node instanceof HTMLElement) {
-        frag.appendChild(node);
-      }
-    });
-    spacer.after(frag);
-    round.live = true;
-    round.wasArchived = true;
-    round.restoring = false;
-    round.measuredHeight = measureHistoryRoundHeight(round) || round.measuredHeight;
-    updateHistoryRoundSpacer(round);
-    return true;
+    return historyWindowManager?.restoreRound?.(round) || false;
   }
 
   function getConversationScrollContainer() {
-    return getConversationObserveTarget() || document.scrollingElement || document.documentElement;
+    return historyWindowManager?.getConversationScrollContainer?.()
+      || queryFirst(SCROLL_CONTAINER_SELECTORS)
+      || getConversationObserveTarget()
+      || document.scrollingElement
+      || document.documentElement;
   }
 
   function getRoundOffsetTop(round) {
-    const anchor = getHistoryRoundAnchorNode(round);
-    const container = getConversationScrollContainer();
-    if (!(anchor instanceof HTMLElement) || !(container instanceof HTMLElement)) return null;
-    const containerRect = container.getBoundingClientRect();
-    const anchorRect = anchor.getBoundingClientRect();
-    return container.scrollTop + (anchorRect.top - containerRect.top);
+    return historyWindowManager?.getRoundOffsetTop?.(round) ?? null;
   }
 
   function adjustConversationScrollBy(delta = 0) {
-    if (!Number.isFinite(delta) || Math.abs(delta) < 0.5) return;
-    const container = getConversationScrollContainer();
-    if (!(container instanceof HTMLElement)) return;
-    container.scrollTop += delta;
+    historyWindowManager?.adjustConversationScrollBy?.(delta);
   }
 
   function syncHistoryRoundStore(domTurns = []) {
     syncHistoryArchiveContext();
     if (!Array.isArray(domTurns) || !domTurns.length) return;
-
-    if (!state.historyArchiveIndexReady || !state.historyArchiveRounds.length) {
-      state.historyArchiveRounds = buildHistoryRoundsFromTurns(domTurns);
-      renumberHistoryRounds(0);
-      state.historyArchiveIndexReady = state.historyArchiveRounds.length > 0;
-      state.historyArchiveWindowStart = 0;
-      state.historyArchiveWindowEnd = Math.max(-1, state.historyArchiveRounds.length - 1);
-      state.historyArchiveWindowMode = 'latest';
-      state.historyArchiveVersion += 1;
-      return;
-    }
-
-    const nextRounds = buildHistoryRoundsFromTurns(domTurns);
-    if (!nextRounds.length) return;
-
-    const replaceStart = Math.max(0, state.historyArchiveWindowStart || 0);
-    const replaceEnd = Math.max(replaceStart - 1, state.historyArchiveWindowEnd || -1);
-    const replaceCount = replaceEnd >= replaceStart ? (replaceEnd - replaceStart + 1) : 0;
-    const existingSlice = state.historyArchiveRounds.slice(replaceStart, replaceStart + replaceCount);
-    const adopted = buildHistoryRoundsFromTurns(
-      nextRounds.flatMap((round) => round.turns),
-      existingSlice
-    );
-
-    state.historyArchiveRounds.splice(replaceStart, replaceCount, ...adopted);
-    renumberHistoryRounds(replaceStart);
-    state.historyArchiveWindowStart = replaceStart;
-    state.historyArchiveWindowEnd = replaceStart + adopted.length - 1;
-    state.historyArchiveIndexReady = true;
+    const nextState = conversationKernel?.syncRoundStore?.({
+      turns: domTurns,
+      existingRounds: state.historyArchiveRounds,
+      indexReady: state.historyArchiveIndexReady,
+      windowStart: state.historyArchiveWindowStart,
+      windowEnd: state.historyArchiveWindowEnd,
+      windowMode: state.historyArchiveWindowMode,
+    });
+    if (!nextState) return;
+    state.historyArchiveRounds = nextState.rounds || [];
+    state.historyArchiveIndexReady = nextState.indexReady === true;
+    state.historyArchiveWindowStart = Number(nextState.windowStart) || 0;
+    state.historyArchiveWindowEnd = Number.isFinite(Number(nextState.windowEnd)) ? Number(nextState.windowEnd) : -1;
+    state.historyArchiveWindowMode = nextState.windowMode || 'latest';
     state.historyArchiveVersion += 1;
   }
 
   function applyHistoryWindowRange(startIndex, endIndex, options = {}) {
-    if (!state.historyArchiveRounds.length) {
-      return { archivedRounds: 0, restoredRounds: 0, liveRounds: 0 };
-    }
-
-    const lastIndex = state.historyArchiveRounds.length - 1;
-    const start = Math.max(0, Math.min(lastIndex, Number(startIndex) || 0));
-    const end = Math.max(start, Math.min(lastIndex, Number(endIndex) || start));
-    const anchorRound = findHistoryRoundById(options.anchorMarkerId || state.historyArchiveOpenMarkerId);
-    const beforeTop = anchorRound ? getRoundOffsetTop(anchorRound) : null;
-    let archivedRounds = 0;
-    let restoredRounds = 0;
-
-    muteConversationObserverFor(document.hidden ? 420 : 260);
-    state.historyArchiveApplyingWindow = true;
-    try {
-      state.historyArchiveRounds.forEach((round, index) => {
-        const shouldLive = index >= start && index <= end;
-        if (shouldLive) {
-          if (restoreHistoryRound(round)) restoredRounds += 1;
-          return;
-        }
-        if (archiveHistoryRound(round)) archivedRounds += 1;
-      });
-    } finally {
-      state.historyArchiveApplyingWindow = false;
-    }
-
-    state.historyArchiveWindowStart = start;
-    state.historyArchiveWindowEnd = end;
-    state.historyArchiveWindowMode = options.mode || 'latest';
-    state.historyArchiveOpenMarkerId = options.focusMarkerId || '';
-    state.historyArchiveVersion += 1;
-    state.timelineTurnsCache = { signature: '', turns: [] };
-
-    const afterTop = anchorRound ? getRoundOffsetTop(anchorRound) : null;
-    if (beforeTop !== null && afterTop !== null) {
-      adjustConversationScrollBy(afterTop - beforeTop);
-    }
-
-    return {
-      archivedRounds,
-      restoredRounds,
-      liveRounds: Math.max(0, end - start + 1),
-    };
+    return historyWindowManager?.applyWindowRange?.(startIndex, endIndex, options)
+      || { archivedRounds: 0, restoredRounds: 0, liveRounds: 0 };
   }
 
   function applyLatestHistoryWindow(options = {}) {
-    const keepRounds = normalizeHistoryCleanerKeepRounds(
-      options.keepRounds ?? state.historyCleanerKeepRounds
-    );
-    if (!state.historyArchiveRounds.length) {
-      return { archivedRounds: 0, restoredRounds: 0, liveRounds: 0 };
-    }
-    const lastIndex = state.historyArchiveRounds.length - 1;
-    const startIndex = Math.max(0, state.historyArchiveRounds.length - keepRounds);
-    return applyHistoryWindowRange(startIndex, lastIndex, {
-      mode: 'latest',
-      focusMarkerId: '',
-      anchorMarkerId: options.anchorMarkerId || '',
-    });
+    return historyWindowManager?.applyLatestWindow?.(options)
+      || { archivedRounds: 0, restoredRounds: 0, liveRounds: 0 };
   }
 
   function focusHistoryRound(markerId, options = {}) {
     syncHistoryArchiveContext();
-    const round = findHistoryRoundById(markerId);
-    if (!round) {
-      if (markerId) {
-        requestHistoryFocusReload(markerId);
-      }
-      return null;
-    }
-
-    const radius = Math.max(1, HISTORY_FOCUS_RADIUS);
-    const startIndex = Math.max(0, round.roundIndex - radius);
-    const endIndex = Math.min(state.historyArchiveRounds.length - 1, round.roundIndex + radius);
-    applyHistoryWindowRange(startIndex, endIndex, {
-      mode: 'focus',
-      focusMarkerId: markerId,
-      anchorMarkerId: markerId,
-    });
-    state.historyArchiveActiveMarkerId = markerId;
-    return getHistoryRoundAnchorNode(findHistoryRoundById(markerId) || round);
+    return historyWindowManager?.focusRound?.(markerId, options) || null;
   }
 
   function scheduleHistoryRoundFocus(markerId, delay = 90) {
-    if (!markerId) return;
-    if (state.historyArchiveFocusTimer) {
-      clearTimeout(state.historyArchiveFocusTimer);
-    }
-    state.historyArchiveFocusTimer = setTimeout(() => {
-      state.historyArchiveFocusTimer = null;
-      focusHistoryRound(markerId, { source: 'timeline-active' });
-      scheduleTimelineRefresh();
-    }, Math.max(40, delay));
+    historyWindowManager?.scheduleFocus?.(markerId, delay);
   }
 
   function releaseHistoryFocusWindow() {
-    if (!state.historyArchiveRounds.length) return;
-    if (state.historyArchiveWindowMode !== 'focus') return;
-    applyLatestHistoryWindow({
-      keepRounds: state.historyCleanerKeepRounds,
-      anchorMarkerId: state.historyArchiveActiveMarkerId || state.historyArchiveOpenMarkerId || '',
-    });
-    state.historyArchiveActiveMarkerId = '';
+    historyWindowManager?.releaseFocusWindow?.();
   }
 
   function captureHistoryWindowState() {
-    return {
-      mode: state.historyArchiveWindowMode,
-      start: state.historyArchiveWindowStart,
-      end: state.historyArchiveWindowEnd,
-      focusMarkerId: state.historyArchiveOpenMarkerId,
-      activeMarkerId: state.historyArchiveActiveMarkerId,
-    };
+    return historyWindowManager?.captureWindowState?.()
+      || conversationKernel?.captureWindowState?.({
+        mode: state.historyArchiveWindowMode,
+        start: state.historyArchiveWindowStart,
+        end: state.historyArchiveWindowEnd,
+        focusMarkerId: state.historyArchiveOpenMarkerId,
+        activeMarkerId: state.historyArchiveActiveMarkerId,
+      }) || {
+        mode: state.historyArchiveWindowMode,
+        start: state.historyArchiveWindowStart,
+        end: state.historyArchiveWindowEnd,
+        focusMarkerId: state.historyArchiveOpenMarkerId,
+        activeMarkerId: state.historyArchiveActiveMarkerId,
+      };
   }
 
   function restoreHistoryWindowState(snapshot) {
-    if (!snapshot || !state.historyArchiveRounds.length) return;
-    if (snapshot.mode === 'focus' && snapshot.focusMarkerId) {
-      focusHistoryRound(snapshot.focusMarkerId, { source: 'restore-window-snapshot' });
-      return;
-    }
-    applyHistoryWindowRange(
-      snapshot.start ?? 0,
-      snapshot.end ?? Math.max(0, state.historyArchiveRounds.length - 1),
-      {
-        mode: snapshot.mode || 'latest',
-        focusMarkerId: snapshot.mode === 'focus' ? snapshot.focusMarkerId || '' : '',
-        anchorMarkerId: snapshot.activeMarkerId || snapshot.focusMarkerId || '',
-      }
-    );
+    historyWindowManager?.restoreWindowState?.(snapshot);
   }
 
   function expandAllHistoryRoundsForRender() {
-    if (!state.historyArchiveRounds.length) return;
-    applyHistoryWindowRange(0, Math.max(0, state.historyArchiveRounds.length - 1), {
-      mode: 'render',
-      focusMarkerId: '',
-      anchorMarkerId: state.historyArchiveActiveMarkerId || state.historyArchiveOpenMarkerId || '',
-    });
+    historyWindowManager?.expandAllForRender?.();
   }
 
   function restoreArchivedRound(markerId, _options = {}) {
-    return focusHistoryRound(markerId, { source: 'manual-restore' });
+    return historyWindowManager?.restoreArchivedRound?.(markerId, _options) || null;
   }
 
   function handleTimelineActiveMarkerChange(marker = {}) {
     if (SITE_KEY !== SITE_KEYS.chatgpt || !state.historyArchiveRounds.length) return;
-    const markerId = marker?.id || '';
-    if (!markerId) return;
-    state.historyArchiveActiveMarkerId = markerId;
-
-    if (marker.archived === true) {
-      if (markerId !== state.historyArchiveOpenMarkerId) {
-        scheduleHistoryRoundFocus(markerId, document.hidden ? 240 : 90);
-      }
-      return;
-    }
-
-    const round = findHistoryRoundById(markerId);
-    if (!round) return;
-    const latestStart = Math.max(0, state.historyArchiveRounds.length - normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds));
-    if (state.historyArchiveWindowMode === 'focus' && round.roundIndex >= latestStart) {
-      if (state.historyArchiveFocusTimer) {
-        clearTimeout(state.historyArchiveFocusTimer);
-        state.historyArchiveFocusTimer = null;
-      }
-      releaseHistoryFocusWindow();
-      scheduleTimelineRefresh();
-    }
+    historyWindowManager?.handleActiveMarkerChange?.(marker);
   }
 
   function applyHistoryArchiveTrim(payload = {}) {
-    syncHistoryArchiveContext();
-    if (!state.historyArchiveRounds.length) {
-      return {
+    return historyArchiveController?.applyTrim?.(payload)
+      || {
         ok: false,
         message: '未找到可归档的对话轮次',
         rounds: 0,
@@ -2471,76 +2861,18 @@
         removedRounds: 0,
         autoMaintain: payload.autoMaintain === true,
       };
-    }
-
-    const keepRounds = normalizeHistoryCleanerKeepRounds(payload.keepRounds ?? state.historyCleanerKeepRounds);
-    const totalRounds = state.historyArchiveRounds.length;
-    const totalMessages = collectTurnsFromHistoryRounds().length;
-    const liveBefore = state.historyArchiveRounds.filter((round) => round.live === true).length;
-    const result = applyLatestHistoryWindow({
-      keepRounds,
-      anchorMarkerId: state.historyArchiveOpenMarkerId || '',
-    });
-    const liveAfter = state.historyArchiveRounds.filter((round) => round.live === true).length;
-
-    return {
-      ok: true,
-      message: `已归档旧对话，当前保留 ${liveAfter} 轮 live 内容`,
-      rounds: totalRounds,
-      messages: totalMessages,
-      removedMessages: Math.max(0, payload.removableTurns?.length || 0),
-      removedRounds: Math.max(0, liveBefore - liveAfter),
-      autoMaintain: payload.autoMaintain === true,
-      archivedRounds: result.archivedRounds,
-      restoredRounds: result.restoredRounds,
-      liveRounds: liveAfter,
-    };
   }
 
   function maybeRestorePendingHistoryFocus() {
-    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
-    try {
-      const raw = sessionStorage.getItem(HISTORY_FOCUS_RELOAD_KEY);
-      if (!raw) return;
-      sessionStorage.removeItem(HISTORY_FOCUS_RELOAD_KEY);
-      const payload = JSON.parse(raw);
-      if (!payload || payload.conversationKey !== getHistoryArchiveConversationKey()) return;
-      const anchor = focusHistoryRound(payload.markerId, { source: 'reload-restore' });
-      if (anchor instanceof HTMLElement) {
-        anchor.scrollIntoView({ block: 'center', behavior: 'auto' });
-        scheduleTimelineRefresh();
-      }
-    } catch (_error) {
-      // ignore session restore failure
-    }
+    historyArchiveController?.maybeRestorePendingFocus?.();
   }
 
   function requestHistoryFocusReload(markerId = '') {
-    if (!markerId) return;
-    try {
-      sessionStorage.setItem(HISTORY_FOCUS_RELOAD_KEY, JSON.stringify({
-        conversationKey: getHistoryArchiveConversationKey(),
-        markerId,
-      }));
-    } catch (_error) {
-      // ignore storage failure
-    }
-    location.reload();
+    historyArchiveController?.requestFocusReload?.(markerId);
   }
 
   function scheduleHistoryArchiveSync(delay = 180) {
-    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
-    if (state.historyArchiveSyncTimer) {
-      clearTimeout(state.historyArchiveSyncTimer);
-    }
-    state.historyArchiveSyncTimer = setTimeout(() => {
-      state.historyArchiveSyncTimer = null;
-      if (state.heavyRefreshTimer) {
-        clearTimeout(state.heavyRefreshTimer);
-        state.heavyRefreshTimer = null;
-      }
-      refreshConversationData();
-    }, Math.max(80, delay));
+    historyArchiveController?.scheduleSync?.(delay);
   }
 
   function getTimelineSummaryText(node) {
@@ -2599,8 +2931,9 @@
       throw new Error('Context Sync 未启用');
     }
 
-    await refreshConversationData();
-    const turns = Array.isArray(state.turns) ? state.turns : [];
+    refreshConversationMetaOnly();
+    await refreshConversationSnapshot({ full: true, reason: 'context-sync', force: true, syncUi: true });
+    const turns = Array.isArray(state.fullTurns) ? state.fullTurns : [];
     const payload = turns.map((turn, index) => {
       const node = turn.node instanceof HTMLElement ? turn.node : null;
       const rect = node?.getBoundingClientRect();
@@ -2768,7 +3101,7 @@
     state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds);
     state.historyCleanerAutoMaintain = normalizeHistoryCleanerAutoMaintain(state.historyCleanerAutoMaintain);
     window.__cedHistoryCleaner?.initialize?.({
-      enabled: state.historyCleanerAutoMaintain,
+      enabled: false,
       keepRounds: state.historyCleanerKeepRounds,
       getTurns: collectHistoryCleanerTurnsFast,
       getObserveTarget: getConversationObserveTarget,
@@ -2782,19 +3115,13 @@
     state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds);
     state.historyCleanerAutoMaintain = normalizeHistoryCleanerAutoMaintain(state.historyCleanerAutoMaintain);
     window.__cedHistoryCleaner?.setConfig?.({
-      enabled: state.historyCleanerAutoMaintain,
+      enabled: false,
       keepRounds: state.historyCleanerKeepRounds,
     });
   }
 
   function handleHistoryCleanerTrim(_result) {
-    muteConversationObserverFor(document.hidden ? 420 : 240);
-    state.timelineTurnsCache.signature = '';
-    scheduleTimelineEnsure(0);
-    scheduleTimelineRefresh();
-    if (shouldRunHeavyRefresh()) {
-      scheduleHeavyRefresh(0);
-    }
+    historyArchiveController?.handleTrim?.(_result);
   }
 
   function getHistoryCleanerStats() {
@@ -2841,8 +3168,106 @@
     }
   }
 
+  function hasMessageTurnDescendant(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    try {
+      return !!element.querySelector(SELECTORS.MESSAGE_TURN);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function getElementHintText(element) {
+    if (!(element instanceof HTMLElement)) return '';
+    return [
+      element.tagName || '',
+      element.id || '',
+      element.className || '',
+      element.getAttribute('data-testid') || '',
+      element.getAttribute('data-message-author-role') || '',
+      element.getAttribute('data-author-role') || '',
+      element.getAttribute('data-role') || '',
+      element.getAttribute('aria-label') || '',
+      element.getAttribute('name') || '',
+      element.getAttribute('placeholder') || '',
+    ].join(' ').toLowerCase();
+  }
+
+  function isComposerOrInputElement(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (isCedUiElement(element)) return false;
+    if (element.closest(SELECTORS.MESSAGE_TURN)) return false;
+    if (element.matches(COMPOSER_IGNORE_SELECTOR) || element.closest(COMPOSER_IGNORE_SELECTOR)) {
+      return true;
+    }
+
+    const hint = getElementHintText(element);
+    if (!hint) return false;
+    if (/(composer|prompt-textarea|chat-input|message-input)/.test(hint)) {
+      return true;
+    }
+
+    if ((element.tagName === 'TEXTAREA' || element.getAttribute('role') === 'textbox' || element.isContentEditable) && !element.closest(SELECTORS.MESSAGE_TURN)) {
+      return true;
+    }
+    return false;
+  }
+
+  function getLowestCommonAncestor(firstNode, lastNode) {
+    if (!(firstNode instanceof Node) || !(lastNode instanceof Node)) return null;
+    const ancestors = new Set();
+    let current = firstNode;
+    while (current) {
+      ancestors.add(current);
+      current = current.parentNode;
+    }
+    current = lastNode;
+    while (current) {
+      if (ancestors.has(current)) {
+        return current;
+      }
+      current = current.parentNode;
+    }
+    return null;
+  }
+
+  function resolveConversationObserveContentRoot() {
+    const turnNodes = collectConversationTurnNodesFast().filter((node) => node instanceof HTMLElement && node.isConnected);
+    if (!turnNodes.length) return null;
+
+    const firstTurn = turnNodes[0];
+    const lastTurn = turnNodes[turnNodes.length - 1];
+    let candidate = getLowestCommonAncestor(firstTurn, lastTurn);
+    if (!(candidate instanceof HTMLElement)) return null;
+
+    if (candidate.matches(SELECTORS.MESSAGE_TURN)) {
+      candidate = candidate.parentElement || candidate;
+    }
+    if (!(candidate instanceof HTMLElement)) return null;
+
+    while (candidate.parentElement instanceof HTMLElement) {
+      const parent = candidate.parentElement;
+      if (parent === document.body || parent === document.documentElement) break;
+      if (parent.matches('main, form, footer')) break;
+      if (isComposerOrInputElement(parent)) break;
+      if (!hasMessageTurnDescendant(parent)) break;
+      try {
+        if (parent.querySelector(COMPOSER_IGNORE_SELECTOR)) break;
+      } catch (_error) {
+        break;
+      }
+      candidate = parent;
+    }
+
+    return candidate;
+  }
+
   function getConversationObserveTarget() {
-    return queryFirst(SCROLL_CONTAINER_SELECTORS)
+    const narrowConversationRoots = CONVERSATION_ROOT_SELECTORS.filter((selector) => selector !== 'main');
+    const narrowScrollRoots = SCROLL_CONTAINER_SELECTORS.filter((selector) => selector !== 'main');
+    return resolveConversationObserveContentRoot()
+      || queryFirst(narrowConversationRoots)
+      || queryFirst(narrowScrollRoots)
       || queryFirst(CONVERSATION_ROOT_SELECTORS)
       || document.querySelector('main')
       || document.body;
@@ -2980,6 +3405,13 @@
         persist(STORAGE_KEYS.historyCleanerAutoMaintain, state.historyCleanerAutoMaintain);
       }
       syncHistoryCleanerFeatureConfig();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.exportRenderScope)) {
+      state.exportRenderScope = normalizeExportRenderScope(patch[STORAGE_KEYS.exportRenderScope]);
+      if (shouldPersist) {
+        persist(STORAGE_KEYS.exportRenderScope, state.exportRenderScope);
+      }
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.contextSyncEnabled)) {
@@ -3146,13 +3578,14 @@
   function updateTurnList() {
     const list = state.panelEl?.querySelector('[data-list="turns"]');
     if (!list) return;
+    const turns = getTurnsForPanel();
 
     const existingMap = new Map();
     Array.from(list.children).forEach((el) => {
       if (el.dataset.id) existingMap.set(el.dataset.id, el);
     });
 
-    const newIds = new Set(state.turns.map((t) => t.id));
+    const newIds = new Set(turns.map((t) => t.id));
 
     // Remove obsolete
     Array.from(list.children).forEach((el) => {
@@ -3162,7 +3595,7 @@
     });
 
     // Append / Update
-    state.turns.forEach((turn, i) => {
+    turns.forEach((turn, i) => {
       let card = existingMap.get(turn.id);
       const isNew = !card;
 
@@ -3180,6 +3613,7 @@
         card.querySelector('input').addEventListener('change', (e) => {
           if (e.target.checked) state.selectedTurnIds.add(turn.id);
           else state.selectedTurnIds.delete(turn.id);
+          state.selectionMode = normalizeSelectionMode('custom');
           refreshPanelOverview();
           refreshActionSection();
         });
@@ -3206,13 +3640,17 @@
   }
 
   function formatRole(role) {
-    return ROLE_LABELS[role] || (role === 'assistant' ? ROLE_LABELS.assistant : ROLE_LABELS.user);
+    return ROLE_LABELS[role] || ROLE_LABELS.user;
   }
 
   function handleSelectAll() {
-    const allSelected = state.turns.length > 0 && state.selectedTurnIds.size === state.turns.length;
-    state.selectedTurnIds.clear();
-    if (!allSelected) state.turns.forEach((t) => state.selectedTurnIds.add(t.id));
+    const turns = getTurnsForPanel();
+    const allSelected = turns.length > 0 && state.selectedTurnIds.size === turns.length;
+    const nextSelection = new Set();
+    if (!allSelected) {
+      turns.forEach((turn) => nextSelection.add(turn.id));
+    }
+    commitSelection(nextSelection, allSelected ? 'none' : 'all');
     updateTurnList();
   }
 
@@ -3225,7 +3663,7 @@
     const fileNameEl = panel.querySelector('[data-ced-overview="filename"]');
     const title = state.pageTitle || ACTIVE_SITE.defaultTitle || '当前会话';
     const selectedCount = state.selectedTurnIds.size;
-    const totalCount = state.turns.length;
+    const totalCount = getTurnsForPanel().length;
     const format = getExportFormatLabel(state.selectedFormat);
     const fileName = state.fileName || '自动使用会话标题';
 
@@ -3250,7 +3688,8 @@
     if (!panel) return;
     const selectButton = panel.querySelector('[data-ced-action="select-all"]');
     const exportButton = panel.querySelector('[data-ced-action="export"]');
-    const allSelected = state.turns.length > 0 && state.selectedTurnIds.size === state.turns.length;
+    const turns = getTurnsForPanel();
+    const allSelected = turns.length > 0 && state.selectedTurnIds.size === turns.length;
     const selectedCount = state.selectedTurnIds.size;
 
     if (selectButton instanceof HTMLButtonElement) {
@@ -3282,28 +3721,51 @@
     );
   }
 
-  function elementMayAffectConversation(element) {
+  function isLikelyConversationMessageElement(element) {
     if (!(element instanceof HTMLElement)) return false;
-    if (isCedUiElement(element)) return false;
-
+    if (isCedUiElement(element) || isComposerOrInputElement(element)) return false;
     if (element.matches(SELECTORS.MESSAGE_TURN)) return true;
-    if (element.matches('[data-message-author-role], [data-author-role], [data-role]')) return true;
+    if (element.matches('[data-message-author-role], article[data-turn]')) return true;
 
     const tag = element.tagName.toLowerCase();
-    if (tag === 'article' || tag === 'user-query' || tag === 'model-response') return true;
+    if (tag === 'article' || tag === 'user-query' || tag === 'model-response') {
+      const hint = getElementHintText(element);
+      if (/(conversation|message|assistant|user|model|reply|turn)/.test(hint)) {
+        return true;
+      }
+    }
 
     const testId = (element.getAttribute('data-testid') || '').toLowerCase();
-    if (testId && /(conversation-turn|conversation|message|chat-history|chat-message)/.test(testId)) {
+    if (testId && /(conversation-turn|chat-message|message-content)/.test(testId)) {
       return true;
     }
 
-    if (element.childElementCount > 0 && element.childElementCount <= 42) {
-      try {
-        if (element.querySelector(SELECTORS.MESSAGE_TURN)) {
+    const role = (element.getAttribute('data-message-author-role') || '').toLowerCase();
+    if (role === 'user' || role === 'assistant') {
+      return true;
+    }
+
+    return false;
+  }
+
+  function elementMayAffectConversation(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (isLikelyConversationMessageElement(element)) return true;
+
+    if (element.childElementCount > 0 && element.childElementCount <= 18 && element !== document.body) {
+      const children = Array.from(element.children || []);
+      for (const child of children) {
+        if (!(child instanceof HTMLElement)) continue;
+        if (isLikelyConversationMessageElement(child)) {
           return true;
         }
-      } catch (_error) {
-        // noop
+        try {
+          if (child.querySelector('[data-message-author-role], article[data-turn], [data-testid^="conversation-turn-"]')) {
+            return true;
+          }
+        } catch (_error) {
+          // noop
+        }
       }
     }
     return false;
@@ -3312,6 +3774,7 @@
   function elementMayAffectMeta(element) {
     if (!(element instanceof HTMLElement)) return false;
     if (isCedUiElement(element)) return false;
+    if (isComposerOrInputElement(element)) return false;
 
     if (element.matches('a[href*="/c/"], [data-testid*="title"], [class*="sidebar"], [class*="history"]')) {
       return true;
@@ -3337,6 +3800,9 @@
     const visited = new Set();
     for (const record of records) {
       if (!record) continue;
+      if (record.target instanceof HTMLElement && isComposerOrInputElement(record.target)) {
+        continue;
+      }
       const candidates = [];
       if (record.target instanceof HTMLElement) {
         candidates.push(record.target);
@@ -3351,6 +3817,7 @@
       for (const element of candidates) {
         if (visited.has(element)) continue;
         visited.add(element);
+        if (isComposerOrInputElement(element)) continue;
 
         if (!impact.conversation && elementMayAffectConversation(element)) {
           impact.conversation = true;
@@ -3366,48 +3833,106 @@
     return impact;
   }
 
+  function collectMutationEnhancerRoots(records) {
+    const roots = [];
+    const seen = new Set();
+    records.forEach((record) => {
+      const candidates = [];
+      record?.addedNodes?.forEach((node) => {
+        if (node instanceof HTMLElement) candidates.push(node);
+      });
+      if (record?.target instanceof HTMLElement) {
+        candidates.push(record.target);
+      }
+      candidates.forEach((element) => {
+        if (!(element instanceof HTMLElement)) return;
+        if (isComposerOrInputElement(element) || isCedUiElement(element)) return;
+
+        const direct = [];
+        if (isLikelyConversationMessageElement(element)) {
+          direct.push(element);
+        } else if (element.childElementCount > 0 && element.childElementCount <= 24) {
+          Array.from(element.querySelectorAll?.('[data-message-author-role], article[data-turn], [data-testid^="conversation-turn-"]') || [])
+            .forEach((node) => direct.push(node));
+        }
+
+        direct.forEach((node) => {
+          if (!(node instanceof HTMLElement) || seen.has(node)) return;
+          seen.add(node);
+          roots.push(node);
+        });
+      });
+    });
+    return roots;
+  }
+
+  function collectDirtyRoundMarkerIdFromMutation(records) {
+    if (!Array.isArray(records) || !records.length) return '';
+    for (const record of records) {
+      const nodes = [];
+      if (record?.target instanceof HTMLElement) {
+        nodes.push(record.target);
+      }
+      record?.addedNodes?.forEach((node) => {
+        if (node instanceof HTMLElement) nodes.push(node);
+      });
+      record?.removedNodes?.forEach((node) => {
+        if (node instanceof HTMLElement) nodes.push(node);
+      });
+      for (const node of nodes) {
+        const markerNode = node.closest?.('[data-ced-round-marker-id]');
+        const markerId = markerNode?.dataset?.cedRoundMarkerId || '';
+        if (markerId) {
+          return markerId;
+        }
+      }
+    }
+    return '';
+  }
+
   function observeConversation() {
     if (state.observer) state.observer.disconnect();
-    if (state.observerFlushTimer) {
-      clearTimeout(state.observerFlushTimer);
-      state.observerFlushTimer = null;
-    }
-    state.observerImpactFlags.conversation = false;
-    state.observerImpactFlags.meta = false;
     state.observer = new MutationObserver((records) => {
       if (Date.now() < (state.historyCleanerObserverMuteUntil || 0)) {
         return;
       }
       const impact = classifyConversationMutations(records);
+      const enhancerRoots = collectMutationEnhancerRoots(records);
+      const dirtyRoundMarkerId = collectDirtyRoundMarkerIdFromMutation(records);
+      if (enhancerRoots.length) {
+        queueEnhancerRoots(enhancerRoots);
+      }
       if (!impact.conversation && !impact.meta) return;
-
-      state.observerImpactFlags.conversation = state.observerImpactFlags.conversation || impact.conversation;
-      state.observerImpactFlags.meta = state.observerImpactFlags.meta || impact.meta;
-
-      if (state.observerFlushTimer) return;
-      const delay = document.hidden ? 420 : 140;
-      state.observerFlushTimer = setTimeout(() => {
-        state.observerFlushTimer = null;
-        const conversationChanged = state.observerImpactFlags.conversation;
-        const metaChanged = state.observerImpactFlags.meta;
-        state.observerImpactFlags.conversation = false;
-        state.observerImpactFlags.meta = false;
-
-        if (conversationChanged) {
+      if (impact.conversation) {
+        state.timelineTurnsCache.signature = '';
+        state.fullSnapshotDirty = true;
+        state.conversationStructureVersion += 1;
+        invalidateTimelineMarkerTopsFromRound(dirtyRoundMarkerId);
+        if (runtimeScheduler) {
+          runtimeScheduler.markDirty('conversation-sync');
+          runtimeScheduler.markDirty('timeline-refresh');
+          runtimeScheduler.markDirty('snapshot-warmup', { phase: 'idle', timeout: document.hidden ? 1400 : 500 });
+          if (state.timelineEnabled && !(document.querySelector('.ced-timeline-bar') instanceof HTMLElement)) {
+            runtimeScheduler.markDirty('timeline-ensure');
+          }
+        } else {
           if (SITE_KEY === SITE_KEYS.chatgpt) {
             scheduleHistoryArchiveSync(document.hidden ? 320 : 140);
           }
-          state.timelineTurnsCache.signature = '';
-          scheduleTimelineEnsure(280);
-          scheduleTimelineRefresh();
-          if (shouldRunHeavyRefresh()) {
-            scheduleHeavyRefresh(760);
+          if (state.timelineEnabled && !(document.querySelector('.ced-timeline-bar') instanceof HTMLElement)) {
+            scheduleTimelineEnsure(280);
           }
+          scheduleTimelineRefresh();
+          scheduleFullSnapshotWarmup(document.hidden ? 1200 : 260);
         }
-        if (conversationChanged || metaChanged) {
+      }
+      if (impact.meta) {
+        if (runtimeScheduler) {
+          runtimeScheduler.markDirty('meta-refresh', { phase: 'idle', timeout: document.hidden ? 900 : 320 });
+        } else {
           scheduleMetaRefresh(260);
         }
-      }, delay);
+      }
     });
     const target = getConversationObserveTarget();
     state.observer.observe(target, { childList: true, subtree: true });
@@ -3660,43 +4185,66 @@
 
   async function exportSelection() {
     if (state.exporting) return;
-    await refreshConversationData();
-    let selection = state.turns.filter((t) => state.selectedTurnIds.has(t.id));
+    refreshConversationMetaOnly();
+    if (!state.fullSnapshotReady || state.fullSnapshotContextKey !== getSelectionContextKey()) {
+      await refreshConversationSnapshot({ full: true, reason: 'export-preflight', force: true, syncUi: true });
+    }
+    let selection = state.fullTurns.filter((t) => state.selectedTurnIds.has(t.id));
     if (!selection.length) return showToast('请至少选择一条消息');
 
     state.exporting = true;
-    showToast('正在处理...', 10000);
+    const exportToken = Date.now();
+    state.exportToken = exportToken;
+    showToast('正在准备导出...', 5000);
     let historyWindowSnapshot = null;
     let expandedHistoryForRender = false;
+    const isRenderFormat = ['pdf', 'screenshot', 'word', 'html'].includes(state.selectedFormat);
+    const selectedAllTurns = state.fullTurns.length > 0 && state.selectedTurnIds.size === state.fullTurns.length;
+    const shouldUseWindowRenderScope = isRenderFormat
+      && selectedAllTurns
+      && normalizeExportRenderScope(state.exportRenderScope) === 'window';
 
     try {
       // 渲染导出需要先懒加载；Claude还需展开折叠代码/文件块。
-      const needsRender = ['pdf', 'screenshot', 'word', 'html'].includes(state.selectedFormat);
+      const needsRender = isRenderFormat;
       const shouldExpandClaude = SITE_KEY === SITE_KEYS.claude;
       historyWindowSnapshot = SITE_KEY === SITE_KEYS.chatgpt && state.historyArchiveRounds.length
         ? captureHistoryWindowState()
         : null;
       if (needsRender || shouldExpandClaude) {
-        if (needsRender && historyWindowSnapshot) {
+        if (needsRender && historyWindowSnapshot && !shouldUseWindowRenderScope) {
+          showToast('正在展开归档内容...', 5000);
           expandAllHistoryRoundsForRender();
           expandedHistoryForRender = true;
         }
-        const wasAllSelected = state.turns.length > 0
-          && state.selectedTurnIds.size === state.turns.length;
+        const wasAllSelected = state.fullTurns.length > 0
+          && state.selectedTurnIds.size === state.fullTurns.length;
         if (needsRender) {
+          showToast('正在加载完整对话...', 8000);
           await autoLoadConversation();
         }
         if (shouldExpandClaude) {
+          showToast('正在展开代码块...', 5000);
           await expandClaudeCollapsedBlocks();
         }
-        await refreshConversationData();
+        refreshConversationMetaOnly();
+        await refreshConversationSnapshot({ full: true, reason: 'export-render-refresh', force: true, syncUi: true });
         if (wasAllSelected) {
-          state.selectedTurnIds = new Set(state.turns.map((turn) => turn.id));
+          commitSelection(new Set(state.fullTurns.map((turn) => turn.id)), 'all');
           updateTurnList();
         }
       }
 
-      selection = state.turns.filter((t) => state.selectedTurnIds.has(t.id));
+      // 检查导出是否已被取消（用户可能切换了对话）
+      if (state.exportToken !== exportToken) {
+        showToast('导出已取消');
+        return;
+      }
+
+      selection = state.fullTurns.filter((t) => state.selectedTurnIds.has(t.id));
+      if (shouldUseWindowRenderScope) {
+        selection = getKernelExportTurns('window');
+      }
       if (!selection.length) throw new Error('没有可导出的对话轮次');
 
       const fmt = state.selectedFormat;
@@ -3706,9 +4254,11 @@
 
       const needsTurnImageResolve = fmt === 'markdown' || fmt === 'json';
       if (needsTurnImageResolve) {
+        showToast('正在处理图片...', 10000);
         await resolveImages(selection);
       }
 
+      showToast('正在生成文件...', 15000);
       if (fmt === 'markdown') await exportMarkdown(selection, filename);
       else if (fmt === 'html') await exportHtml(selection, filename);
       else if (fmt === 'pdf') await exportPdf(selection, filename);
@@ -3717,16 +4267,21 @@
       else if (fmt === 'json') await exportJson(selection, filename);
       else if (fmt === 'word') await exportWord(selection, filename);
       else if (fmt === 'excel' || fmt === 'csv') await exportTable(selection, filename, fmt);
+      
+      showToast('导出成功！', 3000);
     } catch (err) {
-      console.error(err);
-      showToast('导出失败: ' + (err.message || String(err)));
+      // 仅在导出未被取消时显示错误
+      if (state.exportToken === exportToken) {
+        console.error('[ThreadAtlas] Export failed:', err);
+        showToast('导出失败: ' + (err.message || String(err)));
+      }
     } finally {
-      if (expandedHistoryForRender && historyWindowSnapshot) {
+      // 仅在导出未被取消且快照仍然有效时恢复状态
+      if (expandedHistoryForRender && historyWindowSnapshot && state.exportToken === exportToken) {
         restoreHistoryWindowState(historyWindowSnapshot);
         await refreshConversationData();
       }
       state.exporting = false;
-      showToast('导出流程结束');
     }
   }
 
@@ -3966,13 +4521,15 @@
       Array.from(nodes || []).filter((node) => node instanceof HTMLElement)
     );
     const kept = [];
-    for (let i = ordered.length - 1; i >= 0; i--) {
+    for (let i = 0; i < ordered.length; i += 1) {
       const node = ordered[i];
-      if (kept.some((existing) => node.contains(existing))) {
+      if (kept.some((existing) => existing === node || existing.contains(node))) {
         continue;
       }
-      if (kept.some((existing) => existing === node)) {
-        continue;
+      for (let j = kept.length - 1; j >= 0; j -= 1) {
+        if (node.contains(kept[j])) {
+          kept.splice(j, 1);
+        }
       }
       kept.push(node);
     }
@@ -4099,6 +4656,20 @@
     removable.forEach((node) => node.remove());
   }
 
+  function collectSnapshotMessageRoots(root) {
+    if (!(root instanceof HTMLElement)) return [];
+    const roots = [];
+    if (root.matches('[data-ced-message-root="1"]')) {
+      roots.push(root);
+    }
+    root.querySelectorAll('[data-ced-message-root="1"]').forEach((node) => {
+      if (node instanceof HTMLElement) {
+        roots.push(node);
+      }
+    });
+    return roots;
+  }
+
   function buildExportSnapshotRoot(turns, options = {}) {
     if (!turns?.length) return null;
     const includeAllTurns = options.includeAllTurns === true;
@@ -4124,10 +4695,10 @@
     });
     clonedRoot.querySelectorAll('.ced-formula-copy-btn').forEach((el) => el.remove());
 
-    const clonedTurns = Array.from(clonedRoot.querySelectorAll(SELECTORS.MESSAGE_TURN));
+    const clonedTurns = collectSnapshotMessageRoots(clonedRoot);
     clonedTurns.forEach((clonedTurn) => {
       const id = clonedTurn.dataset.cedMessageId;
-      if (!includeAllTurns && id && !selectedIdSet.has(id)) {
+      if (!includeAllTurns && (!id || !selectedIdSet.has(id))) {
         clonedTurn.remove();
         return;
       }
@@ -4143,8 +4714,8 @@
   }
 
   async function buildFullHtmlDocument(turns, options = {}) {
-    const includeAllTurns = options.includeAllTurns !== false;
-    const sourceTurns = includeAllTurns && state.turns.length ? state.turns : turns;
+    const sourceTurns = Array.isArray(turns) && turns.length ? turns : state.fullTurns;
+    const includeAllTurns = options.includeAllTurns === true && sourceTurns === state.fullTurns;
     const snapshotRoot = buildExportSnapshotRoot(sourceTurns, { includeAllTurns });
     if (!snapshotRoot) return '';
     await hydrateSnapshotImages(snapshotRoot, sourceTurns);
@@ -4273,11 +4844,12 @@ ${snapshotRoot.outerHTML}
 
   function sanitizeStyleString(str) {
     if (!str || typeof str !== 'string') return str;
-    const MODERN_COLOR_REGEX = /\b(?:oklch|oklab|lch|lab|color)\s*\([^)]+\)/gi;
+    const MODERN_COLOR_REGEX = /\b(?:oklch|oklab|lch|lab|color)\s*\([^)]+\)/i;
+    const MODERN_COLOR_REGEX_GLOBAL = /\b(?:oklch|oklab|lch|lab|color)\s*\([^)]+\)/gi;
 
     if (!MODERN_COLOR_REGEX.test(str)) return str;
 
-    return str.replace(MODERN_COLOR_REGEX, (match) => getRgbFromSingleColorString(match));
+    return str.replace(MODERN_COLOR_REGEX_GLOBAL, (match) => getRgbFromSingleColorString(match));
   }
 
   function sanitizeModernColors(rootElement) {
@@ -4408,14 +4980,14 @@ ${snapshotRoot.outerHTML}
   async function renderConversationCanvas(turns, options = {}) {
     const exportTurns = Array.isArray(turns) && turns.length
       ? turns
-      : state.turns.filter((t) => state.selectedTurnIds.has(t.id));
+      : state.fullTurns.filter((t) => state.selectedTurnIds.has(t.id));
     if (!exportTurns.length) throw new Error('未找到聊天内容');
 
     const html2canvasImpl = resolveHtml2canvas();
     if (!html2canvasImpl) throw new Error('html2canvas 未加载');
 
-    const visualTurns = state.turns.length ? state.turns : exportTurns;
-    const snapshotNode = buildExportSnapshotRoot(visualTurns, { includeAllTurns: true });
+    const visualTurns = exportTurns;
+    const snapshotNode = buildExportSnapshotRoot(visualTurns, { includeAllTurns: false });
     if (!snapshotNode) {
       throw new Error('未找到可导出的会话容器');
     }
@@ -4479,6 +5051,18 @@ ${snapshotRoot.outerHTML}
       }
       const deviceScale = window.devicePixelRatio || 1;
       const scale = Math.max(1, Math.min(deviceScale, scaleCap));
+      const plannedWidth = Math.ceil(width * scale);
+      const plannedHeight = Math.ceil(renderHeightPx * scale);
+      const plannedPixels = plannedWidth * plannedHeight;
+      const maxCanvasEdge = renderTarget === 'pdf' ? 30000 : 28000;
+      const maxCanvasPixels = renderTarget === 'pdf' ? 95_000_000 : 80_000_000;
+      if (plannedWidth > maxCanvasEdge || plannedHeight > maxCanvasEdge || plannedPixels > maxCanvasPixels) {
+        throw new Error(
+          renderTarget === 'pdf'
+            ? '当前导出范围过大，PDF 渲染尺寸超出浏览器 canvas 限制。请缩小选区，或改用 HTML/Markdown/Word 导出。'
+            : '当前导出范围过大，截图渲染尺寸超出浏览器 canvas 限制。请缩小选区，或改用 PDF/HTML/Markdown 导出。'
+        );
+      }
 
       let canvas;
       try {
@@ -4855,7 +5439,9 @@ ${snapshotRoot.outerHTML}
       showToast('未找到可导出的聊天内容');
       return;
     }
-    const html = await buildFullHtmlDocument(turns, { includeAllTurns: true });
+    const html = exportEngine
+      ? await exportEngine.buildHtmlDocument(turns, { includeAllTurns: true })
+      : await buildFullHtmlDocument(turns, { includeAllTurns: true });
     if (!html?.trim()) {
       throw new Error('未生成可导出的 HTML 内容');
     }
@@ -4867,7 +5453,9 @@ ${snapshotRoot.outerHTML}
       showToast('未找到可导出的聊天内容');
       return;
     }
-    const html = await buildFullHtmlDocument(turns, { includeAllTurns: true });
+    const html = exportEngine
+      ? await exportEngine.buildHtmlDocument(turns, { includeAllTurns: true })
+      : await buildFullHtmlDocument(turns, { includeAllTurns: true });
     if (!html?.trim()) {
       throw new Error('未生成可导出的 HTML 内容');
     }
@@ -4876,8 +5464,9 @@ ${snapshotRoot.outerHTML}
   }
 
   async function exportScreenshot(turns, filename) {
-    const visualTurns = state.turns.length ? state.turns : turns;
-    const renderResult = await renderConversationCanvas(visualTurns);
+    const renderResult = exportEngine
+      ? await exportEngine.renderCanvas(turns, { target: 'screenshot' })
+      : await renderConversationCanvas(turns, { target: 'screenshot' });
     const canvas = renderResult?.canvas;
     if (!canvas) {
       showToast('截图失败，请重试');
@@ -4919,8 +5508,9 @@ ${snapshotRoot.outerHTML}
     }
     showToast('正在生成 PDF...', 15000);
 
-    const visualTurns = state.turns.length ? state.turns : turns;
-    const renderResult = await renderConversationCanvas(visualTurns, { target: 'pdf' });
+    const renderResult = exportEngine
+      ? await exportEngine.renderCanvas(turns, { target: 'pdf' })
+      : await renderConversationCanvas(turns, { target: 'pdf' });
     const canvas = renderResult?.canvas;
     if (!canvas) {
       showToast('截图失败，请重试');
@@ -5046,7 +5636,7 @@ ${snapshotRoot.outerHTML}
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      return;
+      return true;
     }
     try {
       const base64 = await blobToBase64(blob);
@@ -5079,9 +5669,11 @@ ${snapshotRoot.outerHTML}
           );
         });
       }
+      return true;
     } catch (error) {
-      console.error('Download failed:', error);
+      console.error('[ThreadAtlas] Download failed:', error);
       showToast(`下载失败: ${error?.message || '数据传输错误'}`);
+      throw error;
     }
   }
 

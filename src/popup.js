@@ -9,9 +9,11 @@ const STORAGE_KEYS = {
   folderSpacing: 'ced-folder-spacing',
   markdownPatcherEnabled: 'ced-markdown-patcher-enabled',
   snowEffectEnabled: 'ced-snow-effect-enabled',
+  snowEffectDefaultOffApplied: 'ced-snow-effect-default-off-v1',
   historyCleanerKeepRounds: 'ced-history-cleaner-keep-rounds',
   historyCleanerAutoMaintain: 'ced-history-cleaner-auto-maintain',
   historyCleanerDefaultOnApplied: 'ced-history-cleaner-default-on-v1',
+  exportRenderScope: 'ced-export-render-scope',
   contextSyncEnabled: 'ced-context-sync-enabled',
   contextSyncPort: 'ced-context-sync-port',
 };
@@ -27,6 +29,11 @@ const TIMELINE_SCROLL_MODES = [
   { id: 'jump', label: '跳转 (Jump)' },
 ];
 
+const EXPORT_RENDER_SCOPES = [
+  { id: 'window', label: '当前窗口（快）' },
+  { id: 'full', label: '完整会话（慢）' },
+];
+
 const DEFAULTS = {
   [STORAGE_KEYS.formulaCopyFormat]: 'latex',
   [STORAGE_KEYS.timelineEnabled]: true,
@@ -37,10 +44,12 @@ const DEFAULTS = {
   [STORAGE_KEYS.sidebarAutoHideEnabled]: false,
   [STORAGE_KEYS.folderSpacing]: 2,
   [STORAGE_KEYS.markdownPatcherEnabled]: true,
-  [STORAGE_KEYS.snowEffectEnabled]: true,
+  [STORAGE_KEYS.snowEffectEnabled]: false,
+  [STORAGE_KEYS.snowEffectDefaultOffApplied]: false,
   [STORAGE_KEYS.historyCleanerKeepRounds]: 10,
   [STORAGE_KEYS.historyCleanerAutoMaintain]: true,
   [STORAGE_KEYS.historyCleanerDefaultOnApplied]: false,
+  [STORAGE_KEYS.exportRenderScope]: 'window',
   [STORAGE_KEYS.contextSyncEnabled]: false,
   [STORAGE_KEYS.contextSyncPort]: 3030,
 };
@@ -75,6 +84,7 @@ const VISUAL_SETTING_KEYS = new Set([
   STORAGE_KEYS.snowEffectEnabled,
   STORAGE_KEYS.historyCleanerKeepRounds,
   STORAGE_KEYS.historyCleanerAutoMaintain,
+  STORAGE_KEYS.exportRenderScope,
 ]);
 
 const els = {
@@ -98,6 +108,7 @@ const els = {
   snowEffectEnabled: document.getElementById('setting-snow-effect-enabled'),
   historyCleanerKeepRounds: document.getElementById('setting-history-cleaner-keep-rounds'),
   historyCleanerAutoMaintain: document.getElementById('setting-history-cleaner-auto-maintain'),
+  exportRenderScope: document.getElementById('setting-export-render-scope'),
   contextSyncEnabled: document.getElementById('setting-context-sync-enabled'),
   contextSyncPort: document.getElementById('setting-context-sync-port'),
   contextSyncOnline: document.getElementById('context-sync-online'),
@@ -105,6 +116,12 @@ const els = {
   historyCleanerCheck: document.getElementById('history-cleaner-check'),
   historyCleanerTrim: document.getElementById('history-cleaner-trim'),
   openSettings: document.getElementById('open-settings'),
+  diagnosticsSection: document.getElementById('options-diagnostics'),
+  diagnosticsSiteKey: document.getElementById('diagnostics-site-key'),
+  diagnosticsSelector: document.getElementById('diagnostics-selector'),
+  diagnosticsRounds: document.getElementById('diagnostics-rounds'),
+  diagnosticsRefresh: document.getElementById('diagnostics-refresh'),
+  diagnosticsStorage: document.getElementById('diagnostics-storage'),
 };
 
 init().catch((error) => {
@@ -122,6 +139,7 @@ async function init() {
   bindHistoryCleanerActions();
   renderSettings();
   renderTabInfo();
+  await refreshDiagnostics();
   await syncVisualSettingsToTab();
   await refreshContextSyncStatus();
   window.addEventListener('unload', () => {
@@ -154,6 +172,11 @@ function mountSelectOptions() {
       .map((item) => `<option value="${item.id}">${item.label}</option>`)
       .join('');
   }
+  if (els.exportRenderScope) {
+    els.exportRenderScope.innerHTML = EXPORT_RENDER_SCOPES
+      .map((item) => `<option value="${item.id}">${item.label}</option>`)
+      .join('');
+  }
 }
 
 async function hydrateActiveTab() {
@@ -183,6 +206,12 @@ async function hydrateSettings() {
     stored[STORAGE_KEYS.historyCleanerAutoMaintain] = true;
     stored[STORAGE_KEYS.historyCleanerDefaultOnApplied] = true;
   }
+  if (stored[STORAGE_KEYS.snowEffectDefaultOffApplied] !== true) {
+    missingPatch[STORAGE_KEYS.snowEffectEnabled] = false;
+    missingPatch[STORAGE_KEYS.snowEffectDefaultOffApplied] = true;
+    stored[STORAGE_KEYS.snowEffectEnabled] = false;
+    stored[STORAGE_KEYS.snowEffectDefaultOffApplied] = true;
+  }
 
   if (Object.keys(missingPatch).length) {
     await chrome.storage.sync.set(missingPatch);
@@ -196,6 +225,7 @@ async function hydrateSettings() {
   state.settings[STORAGE_KEYS.timelineScrollMode] = normalizeTimelineScrollMode(state.settings[STORAGE_KEYS.timelineScrollMode]);
   state.settings[STORAGE_KEYS.folderSpacing] = normalizeSpacing(state.settings[STORAGE_KEYS.folderSpacing]);
   state.settings[STORAGE_KEYS.historyCleanerKeepRounds] = normalizeHistoryCleanerKeepRounds(state.settings[STORAGE_KEYS.historyCleanerKeepRounds]);
+  state.settings[STORAGE_KEYS.exportRenderScope] = normalizeExportRenderScope(state.settings[STORAGE_KEYS.exportRenderScope]);
   state.settings[STORAGE_KEYS.contextSyncPort] = normalizePort(state.settings[STORAGE_KEYS.contextSyncPort]);
 }
 
@@ -237,6 +267,9 @@ function bindEvents() {
   });
   bindSetting(els.historyCleanerAutoMaintain, STORAGE_KEYS.historyCleanerAutoMaintain, Boolean, undefined, {
     eventNames: ['input', 'change'],
+  });
+  bindSetting(els.exportRenderScope, STORAGE_KEYS.exportRenderScope, normalizeExportRenderScope, undefined, {
+    eventNames: ['change'],
   });
   bindSetting(els.contextSyncEnabled, STORAGE_KEYS.contextSyncEnabled, Boolean, () => {
     renderContextSyncControls();
@@ -349,6 +382,7 @@ function renderSettings() {
   setControlValue(els.snowEffectEnabled, !!state.settings[STORAGE_KEYS.snowEffectEnabled]);
   setControlValue(els.historyCleanerKeepRounds, Number(state.settings[STORAGE_KEYS.historyCleanerKeepRounds] || 10));
   setControlValue(els.historyCleanerAutoMaintain, !!state.settings[STORAGE_KEYS.historyCleanerAutoMaintain]);
+  setControlValue(els.exportRenderScope, state.settings[STORAGE_KEYS.exportRenderScope]);
   setControlValue(els.contextSyncEnabled, !!state.settings[STORAGE_KEYS.contextSyncEnabled]);
   setControlValue(els.contextSyncPort, Number(state.settings[STORAGE_KEYS.contextSyncPort] || 3030));
   if (els.folderSpacingValue) {
@@ -402,6 +436,7 @@ function renderTabInfo() {
   }
   renderHeroSummary();
   renderActionAvailability();
+  refreshDiagnostics();
 }
 
 function isSupportedChatUrl(urlObj) {
@@ -509,6 +544,10 @@ function normalizeHistoryCleanerKeepRounds(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 10;
   return Math.max(1, Math.min(100, Math.round(numeric)));
+}
+
+function normalizeExportRenderScope(value) {
+  return value === 'full' ? 'full' : 'window';
 }
 
 function normalizePort(value) {
@@ -656,6 +695,46 @@ function setBadgeState(element, text, kind = 'soft') {
   element.classList.add(`popup-badge--${kind}`);
 }
 
+async function refreshDiagnostics() {
+  if (!els.diagnosticsSection) return;
+  if (!state.currentTabSupported) {
+    renderDiagnostics(null);
+    return;
+  }
+  const response = await sendMessageToCurrentTab(
+    { type: 'CED_DIAGNOSTICS_GET' },
+    { expectResponse: true }
+  );
+  renderDiagnostics(response?.ok ? response.diagnostics : null);
+}
+
+function renderDiagnostics(diagnostics) {
+  if (!els.diagnosticsSection) return;
+  const data = diagnostics && typeof diagnostics === 'object' ? diagnostics : null;
+  setDiagnosticValue(els.diagnosticsSiteKey, data ? `${data.siteKey || '-'} / ${data.selectorMode || '-'}` : '未连接');
+  setDiagnosticValue(
+    els.diagnosticsSelector,
+    data ? `${data.primarySelectorHits || 0} primary / ${data.fallbackSelectorHits || 0} fallback` : '-'
+  );
+  setDiagnosticValue(
+    els.diagnosticsRounds,
+    data ? `${data.liveRounds || 0} live / ${data.archivedRounds || 0} archived / ${data.roundCount || 0} total` : '-'
+  );
+  setDiagnosticValue(
+    els.diagnosticsRefresh,
+    data ? `${Math.round(Number(data.lastRefreshDurationMs) || 0)} ms` : '-'
+  );
+  setDiagnosticValue(
+    els.diagnosticsStorage,
+    data?.lastStorageError ? data.lastStorageError : '无错误'
+  );
+}
+
+function setDiagnosticValue(element, value) {
+  if (!(element instanceof HTMLElement)) return;
+  element.textContent = String(value || '-');
+}
+
 async function refreshContextSyncStatus() {
   const enabled = !!state.settings[STORAGE_KEYS.contextSyncEnabled];
   if (!enabled) {
@@ -730,6 +809,7 @@ async function handleHistoryCleanerCheck() {
     throw new Error(response?.message || response?.error || '无法读取当前轮数');
   }
   setStatus(`当前页面显示 ${response.rounds} 轮，${response.messages} 个消息节点`);
+  await refreshDiagnostics();
 }
 
 async function handleHistoryCleanerTrim() {
@@ -755,6 +835,7 @@ async function handleHistoryCleanerTrim() {
     throw new Error(response?.message || response?.error || '裁剪失败');
   }
   setStatus(response.message || `已保留最近 ${keepRounds} 轮`);
+  await refreshDiagnostics();
 }
 
 let statusTimer = null;

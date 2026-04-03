@@ -1,5 +1,433 @@
 # Todo
 
+## Iteration 42 Goal
+- 将当前工作区里的已完成功能更新整理成一次可验证的 GitHub 推送。
+- 在提交前完成仓库现有可执行校验：静态语法检查与扩展打包。
+- 在 `tasks/todo.md` 中记录本轮发布计划、验证结果与推送状态。
+
+## Iteration 42 Plan
+- [ ] 复核当前工作区改动与远程分支状态，确认推送目标为 `origin/main`。
+- [ ] 运行本仓库现有校验：对新增/核心脚本执行 `node --check`，并运行 `./scripts/build-crx.sh`。
+- [ ] 汇总变更、创建提交、推送到 GitHub。
+- [ ] 补写本轮 review，记录校验与推送结果。
+
+## Iteration 42 Acceptance
+- [ ] `git status` 仅包含本轮要提交的文件。
+- [ ] 静态语法检查通过。
+- [ ] `./scripts/build-crx.sh` 成功产出发布包。
+- [ ] 提交已推送到 `origin/main`。
+
+## Iteration 42 Review
+- 待完成。
+
+## Iteration 41 Goal
+- 将当前解析链路拆成“结构同步（live snapshot）”和“完整快照（full snapshot）”两层，避免 `refreshConversationData()` 一次性承担所有职责。
+- 页面加载后自动在空闲时预热完整轮次，不再依赖用户先点导出才准备 full snapshot。
+- 降低时间轴的持续布局成本：按需失效 marker top，滚动时不再无脑全量重算。
+
+## Iteration 41 Plan
+- [x] 在 `state` 中新增 `liveTurns/fullTurns/fullSnapshot*` 字段，并把 `state.turns` 收敛为兼容别名。
+- [x] 拆分 `refreshConversationData()` 为 `refreshConversationMetaOnly()` + `refreshConversationSnapshot()`，新增 `scheduleFullSnapshotWarmup()`。
+- [x] 调整 scheduler、init、route change、observer：普通变更只做 live sync，并在 idle 触发 full warmup。
+- [x] 调整面板/导出/context sync 数据源，优先使用 full snapshot，不再要求用户先点导出。
+- [x] 为 timeline 增加 marker top 增量失效机制，并由 content-script 在结构变化时主动标记失效。
+- [x] 更新 lessons/todo review，运行静态校验与打包。
+
+## Iteration 41 Review
+- `src/content-script.js`
+  - 新增 `liveTurns/fullTurns/fullSnapshotReady/fullSnapshotDirty/fullSnapshotContextKey/fullSnapshotInFlight` 等状态，把 live 结构同步和 full snapshot 彻底拆开。
+  - `init()` 改成“先 `refreshConversationMetaOnly()` + `refreshConversationSnapshot({full:false})`，再 `scheduleFullSnapshotWarmup(0)`”，页面首次加载不再等待完整导出级解析。
+  - 新增 `refreshConversationSnapshot()` / `collectConversationTurnsForChatGptSnapshot()` / `scheduleFullSnapshotWarmup()`，普通页面刷新默认只同步 live 数据，完整 turns 在 idle 预热。
+  - `observeConversation()`、route change 和 scheduler 现在只把会话变更标记为 `fullSnapshotDirty` 并安排 `snapshot-warmup`，不再依赖“导出面板打开”才做 full parse。
+  - 导出、面板 turn 列表、Context Sync 已切到 full snapshot 优先：导出前会做 full preflight，面板未预热完成时回退到 live turns。
+- `src/timeline-feature.js`
+  - 新增 `markerTopDirtyStart/markerIndexById` 和 `invalidateMarkerTopsFrom*()`。
+  - `refresh()` 改为 marker 渲染和 top 计算分离；scroll 时只有 dirty 后缀才重算，不再周期性全量 `computeMarkerTops()`。
+  - 暴露 `invalidateMarkerTopsFrom()` / `invalidateMarkerTopsFromMarkerId()` 供 content-script 主动标记失效。
+- `tasks/lessons.md`
+  - 补充“结构同步和完整快照必须拆开”的规则，避免后续再把 live/full parse 重新绑回一个入口。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/runtime-scheduler.js`
+  - `node --check src/history-archive-controller.js`
+  - `./scripts/build-crx.sh`
+
+## Iteration 40 Goal
+- 按用户提供的 modernization 补丁同步 ChatGPT 现代 DOM 兼容改动。
+- 收紧并补强 ChatGPT 选择器、稳定 ID、mutation 影响判断与 timeline 滚动容器解析。
+- 保持现有重构分层不回退，只落补丁涉及的行为差异。
+
+## Iteration 40 Plan
+- [x] 对齐 `content-script.js` 的 ChatGPT selectors、稳定 ID、content root 解析与 mutation 影响判断。
+- [x] 对齐 `chatgpt-conversation-parser.js` / `conversation-kernel.js` / `timeline-feature.js` 的补丁差异。
+- [x] 更新 lessons/todo review，并运行静态校验与打包。
+
+## Iteration 40 Review
+- 已按补丁同步 ChatGPT 现代 DOM 兼容改动：
+  - `src/content-script.js`：更新 ChatGPT selectors、content node 解析、stable id token、fast selector 与 mutation 相关性判断。
+  - `src/chatgpt-conversation-parser.js`：对齐 parser 默认 selector。
+  - `src/conversation-kernel.js`：恢复 round marker 优先 user turn。
+  - `src/timeline-feature.js`：增强 scroll container 选择、预览滚动行为与 resize 时的容器重绑定。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/chatgpt-conversation-parser.js`
+  - `node --check src/conversation-kernel.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`
+
+## Iteration 39 Goal
+- 修复 ChatGPT 长会话链路中的 6 个结构性 bug：空选区回弹、message/round ID 不稳定、时间轴 320 条硬截断、导出快照误删嵌套 turn、归档 focus 失败 reload、round 分组过度依赖 role。
+- 让 turn 选择、时间轴 marker、归档定位和导出都建立在稳定主键上，而不是内容签名和宽泛 selector。
+- 保持当前架构分层不回退：`content-script` 继续做装配，`conversation-kernel` / `history-window-manager` / `timeline-feature` 分别收敛各自职责。
+
+## Iteration 39 Plan
+- [x] 修复选择保持：引入显式 selection mode/context，同会话内允许“取消全选”持续为空，新会话再恢复默认全选。
+- [x] 修复稳定主键：message ID 改为优先宿主 root 标识或节点持久 synthetic id，round marker 采用稳定 turn 锚点并复用已有 round。
+- [x] 修复时间轴完整性：移除 320 marker 硬截断，保留完整历史 marker 数据。
+- [x] 修复导出快照过滤：导出仅按顶层消息根节点过滤，不再用宽泛 `MESSAGE_TURN` 删除嵌套 role 子节点。
+- [x] 修复归档 focus：找不到 round 时不再整页 reload。
+- [x] 增强 round 分组：在 role 不可靠时采用更稳的分组回退，避免多轮被合并成一轮。
+- [x] 更新 lessons/todo review，运行 `node --check` 和 `./scripts/build-crx.sh`。
+
+## Iteration 39 Review
+- `src/content-script.js`
+  - 新增 `selectionMode` / `selectionContextKey` / `syncSelectionContext()` / `commitSelection()`，把“首次进入默认全选”和“用户显式清空选择”分开处理。
+  - `refreshConversationData()` 不再因为空选区或旧 id 不匹配就自动回弹成全选；同会话内空选区会被保留，新会话才回到默认全选。
+  - message id 改为 `ensureStableMessageId()`：优先使用宿主稳定 root 标识，否则给消息根节点分配一次性 synthetic id，不再把内容签名当主键。
+  - 顶层消息根节点统一标记 `data-ced-message-root=\"1\"`，导出快照按这个根节点集合过滤，避免删除嵌套 `[data-message-author-role]` 子树。
+  - ChatGPT 主 `MESSAGE_TURN` selector 收紧为 `[data-testid^=\"conversation-turn-\"]`，`article` 和 author-role 只留在 fallback 链路。
+- `src/conversation-kernel.js`
+  - round 分组新增 `resolveRoundRole()`，优先重查显式 author metadata。
+  - 当连续消息都没有明确 user 时，采用保守的“最多两条 assistant 组成一个 fallback round”策略，避免长串内容被错误并成单轮。
+  - `buildRounds()` 会按稳定 turn id 复用已有 round，marker id 优先继承旧 round，降低 timeline/focus 元数据漂移。
+- `src/timeline-feature.js`
+  - 移除默认 `320` 条 marker 硬上限；只有显式配置正数上限时才裁剪，默认保留完整历史 marker。
+- `src/history-window-manager.js`
+  - `focusRound()` 找不到目标 round 时直接返回 `null`，不再触发 reload 级回退。
+- `src/history-archive-controller.js`
+  - `requestFocusReload()` 退化为 no-op 清理，避免遗留 session reload 链路继续生效。
+- `tasks/lessons.md`
+  - 补充“空选区不能自动回弹”、“turn/round 主键必须稳定”、“时间轴与归档不能靠硬截断或 reload 掩盖问题”的规则。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/conversation-kernel.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/history-window-manager.js`
+  - `node --check src/history-archive-controller.js`
+  - `./scripts/build-crx.sh`
+
+## Iteration 38 Goal
+- 修复 ChatGPT 解析主链路对 round/archive store 的错误强依赖。
+- 确保 DOM 解析结果在 round store 异常、空结果或未准备好时仍能作为保底数据源返回。
+- 让时间轴在 `user` 角色识别异常时降级为 `all`，避免整条时间轴直接消失。
+
+## Iteration 38 Plan
+- [x] 修正 `chatgpt-conversation-parser.js`：`parseConversation()` 优先返回 archive turns，空时退回 `domTurns`。
+- [x] 修正 `content-script.js`：`collectConversationTurnsForChatGpt()` 做同样的保底返回，并收紧 ChatGPT 主 root selector。
+- [x] 修正 `timeline-feature.js`：当 `markerRole=user` 过滤结果为空时，自动降级使用全部 turns。
+- [x] 补充 lessons、运行静态校验与打包，并记录 review。
+
+## Iteration 38 Review
+- 根因修正：
+  - ChatGPT 分支此前把“DOM 解析成功”错误地绑成“必须 round/archive store 也成功且能再读出来”，导致一旦 store 链路为空，`state.turns` 会被覆盖成 `[]`，时间轴和导出一起失效。
+- `src/chatgpt-conversation-parser.js`
+  - `parseConversation()` 现在在拿到 `domTurns` 后，会优先返回 `archiveTurns`，但当 archive 结果为空时会退回 `domTurns`。
+  - 这让 round store 从“主链路单点依赖”降级为“增强层”。
+- `src/content-script.js`
+  - `collectConversationTurnsForChatGpt()` 同样补了保底返回：parser 结果为空时不再直接认定“没有对话”，而是回退到 `domTurns`。
+  - ChatGPT 主 `MESSAGE_TURN` selector 改为 `"[data-testid^=\"conversation-turn-\"], article"`，把 `[data-message-author-role]` 从主 root selector 挪到 fallback selectors，避免角色子节点参与主 turn root 去重。
+- `src/timeline-feature.js`
+  - `collectMarkers()` 在 `markerRole='user'` 且过滤后为空时，会自动降级使用全部 turns，避免 role 误判时整条时间轴直接消失。
+- `tasks/lessons.md`
+  - 补充“ChatGPT 解析结果不能强依赖 round/archive store 才能返回”的规则。
+- 验证：
+  - `node --check src/chatgpt-conversation-parser.js`
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`
+  - 产物：
+    - `dist/threadatlas.zip`
+    - `dist/threadatlas.crx`
+
+## Iteration 37 Goal
+- 修复 ChatGPT 时间轴无法识别对话轮次的问题。
+- 纠正重叠消息选择器的去重语义，确保 round 解析和时间线都保留消息根节点，而不是内部子节点。
+- 对应修正内容脚本和时间线模块的节点去重实现，并做静态验证。
+
+## Iteration 37 Plan
+- [x] 修正 `content-script.js` 的 `dedupeMessageNodes()`，改为保留最外层消息根节点。
+- [x] 修正 `timeline-feature.js` 的 `dedupeNodes()`，避免 fallback 路径继续保留内部子节点。
+- [x] 补充 `tasks/lessons.md`，记录“重叠选择器去重必须保留消息根节点”的经验。
+- [x] 运行静态验证与打包，补写本轮 review。
+
+## Iteration 37 Review
+- 根因：
+  - ChatGPT 选择器同时命中消息根节点和内部 `[data-message-author-role]` 子节点时，去重逻辑保留了“最深层子节点”。
+  - 这会让 round 解析、时间线 fallback 以及观察根推导都拿不到真正的消息根节点，最终表现为“时间轴识别不到对话轮次”。
+- `src/content-script.js`
+  - `dedupeMessageNodes()` 从“反向遍历屏蔽祖先”改成“正向遍历保留最外层根节点，并删除被新根节点包住的旧项”。
+  - 这样 `collectConversationTurns()`、`collectConversationTurnNodesFast()`、ChatGPT parser 和 round 索引都会保留真正的消息根节点。
+- `src/chatgpt-conversation-parser.js`
+  - fast path 改为优先只采 `[data-testid^="conversation-turn-"]`，只有完全找不到时才回退到 `[data-message-author-role]`。
+  - 这样新版 ChatGPT 即使在消息内部嵌套 author-role 节点，也不会再把它们误当作独立轮次根节点。
+- `src/timeline-feature.js`
+  - `dedupeNodes()` 同步改成同样的语义，避免时间线 fallback 路径在模块内部再次把根节点替换成深层子节点。
+- `tasks/lessons.md`
+  - 新增“重叠消息选择器去重必须保留消息根节点”的规则，防止以后在其它站点重复踩坑。
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`
+  - 产物：
+    - `dist/threadatlas.zip`
+    - `dist/threadatlas.crx`
+
+## Iteration 36 Goal
+- 扫描并修复时间线与历史裁剪链路中的高风险实现问题。
+- 优先处理 ChatGPT 路径下的 marker 采集、滚动定位、round 窗口同步与裁剪统计。
+- 保持现有“归档旧轮次而非销毁历史”的产品语义不变，只修正错误行为与错误数据。
+
+## Iteration 36 Plan
+- [x] 修正时间线数据源：去掉 ChatGPT fast turn 采集里的重复节点与非消息节点污染，避免 round/timeline 重复计数。
+- [x] 修正时间线展示与跳转：长会话 marker 上限保留最近轮次，预览编号与实际 round 对齐，并让历史窗口滚动补偿使用真实滚动容器。
+- [x] 修正裁剪链路：校正 applyTrim 的 removed 统计与归档窗口联动，避免“裁剪结果文案与实际窗口状态不一致”。
+- [x] 完成静态校验、差异复核，并补写本轮 review。
+
+## Iteration 36 Acceptance
+- [x] ChatGPT 时间线不会因 `[data-testid^="conversation-turn-"], [data-message-author-role]` 的重复命中而出现重复圆点或错误轮次。
+- [x] 当会话轮次超过 `maxMarkers` 时，时间线仍优先保留最近轮次，预览编号与实际轮次一致。
+- [x] 裁剪后状态文案与 live window 实际保留轮次一致，removed 统计不再把“轮次”误报成“消息”。
+- [x] 构建或静态检查完成，并把无法在当前环境验证的内容明确记录。
+
+## Iteration 36 Review
+- `src/chatgpt-conversation-parser.js`
+  - `collectTurnNodesFast()` 现在会先做统一去重，再返回 ChatGPT fast selector 命中的 turn 节点，避免 `[data-testid^="conversation-turn-"], [data-message-author-role]` 在新版 DOM 下把同一轮重复算两次。
+- `src/content-script.js`
+  - `collectConversationTurnNodesFast()` 对 parser 返回值和本地 fallback 都做了去重，避免时间线、observe root 推导和 round 索引被重复节点污染。
+  - `initHistoryWindowManager()` 新增真实滚动容器注入，归档窗口滚动补偿改为跟时间线使用同一套 `SCROLL_CONTAINER_SELECTORS`。
+  - `getConversationScrollContainer()` 的本地 fallback 也优先使用真实滚动容器，而不是直接退回 observe target。
+- `src/timeline-feature.js`
+  - marker 上限从“截前 320 个”改为“保留最近 320 个”，修复长会话时最新轮次不进时间线的问题。
+  - 透传并保留 `roundIndex`，预览编号与 dot label 改为显示真实轮次编号，而不是局部切片后的序号。
+  - marker render signature 额外纳入 `roundIndex`，避免编号变化时 UI 仍沿用旧渲染结果。
+- `src/history-window-manager.js`
+  - `getConversationScrollContainer()` 支持外部注入真实 scroll container，避免 focus/trim 之后用错误容器做 `scrollTop` 补偿，导致时间线高亮和页面位置错位。
+- `src/history-archive-controller.js`
+  - `applyTrim()` 改为按“即将从 live window 进入 archived 的 round”统计 `removedRounds` / `removedMessages`，不再把 round 数误当消息数。
+  - trim 结果文案按 `archived / restored / noop` 三种结果区分，避免在只是扩窗或无需变更时仍然提示“已归档”。
+- 验证：
+  - `node --check src/chatgpt-conversation-parser.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/history-window-manager.js`
+  - `node --check src/history-archive-controller.js`
+  - `node --check src/content-script.js`
+  - `./scripts/build-crx.sh`
+  - 当前只完成了静态校验和打包；真实 ChatGPT 页面中的时间线跳转、focus 窗口释放和裁剪反馈仍需要页面实测。
+
+## Iteration 35 Goal
+- 将 `refreshConversationData()` 里的 ChatGPT 专用解析分支抽到独立 `chatgpt-conversation-parser`。
+- 保持通用 `parseMessage()` / fallback 解析仍在 `content-script.js`，先收 ChatGPT 站点特有的 turn 收集、round sync 与 auto-maintain 协调。
+- 让 `content-script.js` 继续向“装配层 + 通用工具层”收敛。
+
+## Iteration 35 Plan
+- [x] 新增 `src/chatgpt-conversation-parser.js`，承接 ChatGPT turn 收集、fast turn node 收集、round store sync 与 latest window 协调。
+- [x] 在 `manifest.json` 注入新模块，并在 `content-script.js` 中初始化 parser。
+- [x] 将 `collectConversationTurnNodesFast()` / `collectConversationTurnsForChatGpt()` 的实现改成 parser wrapper，并让 `refreshConversationData()` 走 parser。
+- [x] 重新打包验证并补充本轮 review。
+
+## Iteration 35 Review
+- 新增模块：
+  - `src/chatgpt-conversation-parser.js`
+  - 负责 ChatGPT 专用解析分支：
+    - fast turn node 收集
+    - 当前会话 turn 收集
+    - round store sync
+    - latest window 自动维持
+- `src/content-script.js`
+  - 新增 `chatgptConversationParser` 初始化，把 `messageSelector / dedupeNodes / syncArchiveContext / collectDomTurns / collectArchiveTurns / syncRoundStore / applyLatestWindow` 作为依赖注入。
+  - `refreshConversationData()` 的 ChatGPT 分支改为走 `collectConversationTurnsForChatGpt()`，而该函数已优先委托给 parser。
+  - `collectConversationTurnNodesFast()` 改为优先委托 parser，保留本地 fallback，避免模块缺失时直接返回空。
+- `manifest.json`
+  - 在 `src/history-archive-controller.js` 后注入 `src/chatgpt-conversation-parser.js`。
+- 分层结果：
+  - `conversation-kernel.js`：round 数据模型。
+  - `history-window-manager.js`：DOM archive/restore/window。
+  - `history-archive-controller.js`：context/trim/reload restore/sync 调度。
+  - `chatgpt-conversation-parser.js`：ChatGPT 专用 turn 收集和 round sync。
+  - `content-script.js`：装配层 + 跨站点通用解析工具。
+- 验证：
+  - `./scripts/build-crx.sh` 已通过，产物：
+    - `dist/threadatlas.zip`
+    - `dist/threadatlas.crx`
+  - `node --check` 仍无法执行：当前 shell 环境没有 `node/nodejs/bun/deno`。
+
+## Iteration 34 Goal
+- 将 ChatGPT 的历史归档调度从 `content-script.js` 进一步抽离成独立 `history-archive-controller`。
+- 拆分“DOM 窗口操作”和“refresh / context / reload / trim 调度”，让两层职责彻底分开。
+- 保持现有调用点稳定，优先用薄 wrapper 降低行为回归风险。
+
+## Iteration 34 Plan
+- [x] 新增 `src/history-archive-controller.js`，承接 context 同步、归档清理、reload 恢复、sync 调度、trim 协调。
+- [x] 在 `manifest.json` 注入新模块，并在 `content-script.js` 里初始化 controller。
+- [x] 把 `syncHistoryArchiveContext()` / `clearHistoryArchive()` / `scheduleHistoryArchiveSync()` / `maybeRestorePendingHistoryFocus()` / `requestHistoryFocusReload()` / `applyHistoryArchiveTrim()` 改成 controller wrapper。
+- [x] 重新打包验证并补充本轮 review。
+
+## Iteration 34 Review
+- 新增模块：
+  - `src/history-archive-controller.js`
+  - 负责 ChatGPT 历史归档的调度层：会话 key 同步、归档状态清空、pending focus reload 恢复、history sync idle 调度、trim 结果汇总、trim 后 UI 协调。
+- `src/content-script.js`
+  - 新增 `historyArchiveController` 初始化，把 `state / getConversationKey / requestRefresh / shouldRunHeavyRefresh / scheduleTimelineRefresh / scheduleTimelineEnsure / muteConversationObserverFor` 等依赖集中注入。
+  - `syncHistoryArchiveContext()` / `clearHistoryArchive()` / `applyHistoryArchiveTrim()` / `maybeRestorePendingHistoryFocus()` / `requestHistoryFocusReload()` / `scheduleHistoryArchiveSync()` / `handleHistoryCleanerTrim()` 改为 controller wrapper。
+  - `refreshConversationData()`、scheduler flush、route change 和 history cleaner 继续通过原调用点驱动，但调度实现已不再直接写在内容脚本里。
+- `manifest.json`
+  - 在 `src/history-window-manager.js` 后注入 `src/history-archive-controller.js`。
+- 分层结果：
+  - `conversation-kernel.js`：round 数据与窗口状态模型。
+  - `history-window-manager.js`：真实 DOM / spacer / archive / restore / focus window。
+  - `history-archive-controller.js`：context / trim / reload restore / refresh 调度。
+  - `content-script.js`：装配、消息桥接、feature 协调。
+- 验证：
+  - `./scripts/build-crx.sh` 已通过，产物：
+    - `dist/threadatlas.zip`
+    - `dist/threadatlas.crx`
+  - `node --check` 仍无法执行：当前 shell 环境没有 `node/nodejs/bun/deno`。
+
+## Iteration 33 Goal
+- 将 ChatGPT 的真实 DOM 归档/恢复/窗口切换逻辑从 `content-script.js` 下沉到独立 `history-window-manager`。
+- 保持 `conversation-kernel` 继续只负责 round 数据与窗口状态建模，避免数据层和宿主 DOM 层重新耦合。
+- 让 `content-script.js` 进一步收敛为装配层与业务编排层。
+
+## Iteration 33 Plan
+- [x] 新增 `src/history-window-manager.js`，封装 archive/restore/spacer/scroll/window/focus 逻辑。
+- [x] 在 `manifest.json` 注入新模块，并在 `content-script.js` 中初始化 manager。
+- [x] 将 `content-script.js` 的 DOM 窗口函数改成 manager wrapper，保留原调用点，降低回归风险。
+- [x] 重新打包验证并补充本轮 review。
+
+## Iteration 33 Review
+- 新增模块：
+  - `src/history-window-manager.js`
+  - 负责 ChatGPT 历史窗口的真实 DOM 生命周期：`spacer`、archive pool、窗口切换、滚动补偿、focus 恢复、timeline active 联动。
+- `src/content-script.js`
+  - 新增 `historyWindowManager` 初始化，把 `state / kernel / measureRoundHeight / observeTarget / queueEnhancerRoots / requestFocusReload` 等依赖集中注入。
+  - `getHistoryRoundAnchorNode()` / `archiveHistoryRound()` / `restoreHistoryRound()` / `applyHistoryWindowRange()` / `applyLatestHistoryWindow()` / `focusHistoryRound()` / `restoreHistoryWindowState()` / `expandAllHistoryRoundsForRender()` / `handleTimelineActiveMarkerChange()` 改成 manager wrapper。
+  - 保留 `syncHistoryArchiveContext()` / `clearHistoryArchive()` / `syncHistoryRoundStore()` / `scheduleHistoryArchiveSync()` 在装配层，继续负责会话切换、内核同步和 refresh 调度。
+- `manifest.json`
+  - 在 `src/conversation-kernel.js` 后、`src/export-engine.js` 前注入 `src/history-window-manager.js`。
+- 分层结果：
+  - `conversation-kernel.js` 继续只管 round 数据建模、窗口快照和 diagnostics。
+  - `history-window-manager.js` 专门处理宿主 DOM、spacer 和 scroll 容器。
+  - `content-script.js` 进一步收敛为 orchestration。
+- 验证：
+  - `./scripts/build-crx.sh` 已通过，产物：
+    - `dist/threadatlas.zip`
+    - `dist/threadatlas.crx`
+  - `node --check` 仍无法执行：当前 shell 环境没有 `node/nodejs/bun/deno`。
+
+## Iteration 31 Goal
+- 按“ThreadAtlas ChatGPT 内核重构与性能止损方案”执行一轮大重构。
+- 将 ChatGPT 路径收敛为“增量索引内核 + 统一调度器 + Window First 导出”。
+- 同时完成 P0/P1 止损：去轮询、降全局观察、修 storage 错误处理、补诊断面板。
+
+## Iteration 31 Plan
+- [x] 新增 `runtime-scheduler` / `conversation-kernel` / `export-engine`，并接入 `manifest`。
+- [x] 将 `content-script` 改为装配层：统一初始化、内核快照、调度器刷新、导出范围策略。
+- [x] 修复 P0 问题：颜色正则状态 bug、toast timer 竞争、sync 写入错误处理、选择器主路径优先。
+- [x] 去掉高频轮询与整页 observer：
+  - [x] `timeline-feature` 去 URL 轮询与 dataset 摘要缓存。
+  - [x] `title-updater-feature` 去周期性 refresh。
+  - [x] `formula-copy-feature` 去 body 级 observer。
+  - [x] `markdown-patcher-feature` 去 body 级 observer。
+  - [x] `sidebar-autohide-feature` 去 rebind interval。
+- [x] 将文件夹存储迁移到 `Sync + Local`，保留兼容迁移与错误日志。
+- [x] 新增导出渲染范围设置 `ced-export-render-scope`，渲染类导出默认走 `window`。
+- [x] 在 options 页增加诊断卡片，并通过 content script 暴露内核诊断信息。
+- [ ] 完成 `node --check` 与 `./scripts/build-crx.sh` 静态验证，并记录 review。
+
+## Iteration 31 Review
+- 关键架构改动：
+  - 新增 `src/runtime-scheduler.js`，把 conversation / timeline / meta / enhancer 刷新统一收敛到 `requestAnimationFrame + requestIdleCallback`。
+  - 新增 `src/conversation-kernel.js`，维护 rounds / turns / liveWindow / archivedWindow / selector diagnostics，并为时间轴与诊断卡片提供统一快照。
+  - 新增 `src/export-engine.js`，把渲染类导出的 HTML/canvas 入口从 `content-script` 中抽成独立封装层。
+- `src/content-script.js`
+  - ChatGPT 主选择器改为 `"[data-testid^=\"conversation-turn-\"], [data-message-author-role]"`，`article` 只留给 fallback。
+  - 修复 `patchHtml2canvasColorParser()` 与 `sanitizeStyleString()` 的全局正则 `test()` 状态 bug。
+  - `showToast()` 改为单 timer，避免旧 toast 抢先关闭新 toast。
+  - `persist()` 改为 callback 写入并记录 `chrome.runtime.lastError`，诊断面板可显示最近一次 storage 错误。
+  - 新增 `CED_DIAGNOSTICS_GET` 消息，向 options 页提供 site key / selector mode / live rounds / archived rounds / refresh ms / storage error。
+  - `refreshConversationData()` 现在会把 turns/rounds 快照写入 kernel，并把新增/恢复节点的公式复制与 Markdown 修复走增量根节点刷新。
+  - `observeConversation()` 改成 scheduler 驱动，不再靠 content-script 自己的 `setTimeout + flag` 聚合链。
+  - 渲染类导出新增 `ced-export-render-scope`，默认 `window`；全选长会话时不会再默认强制展开全部归档轮次。
+- Feature 层收敛：
+  - `src/timeline-feature.js`
+    - 删除 URL 轮询。
+    - 摘要缓存从 DOM `dataset` 改为 `WeakMap`。
+    - `dedupeNodes()` 改为线性祖先屏蔽，去掉 O(n²) 的 `some()` 扫描。
+  - `src/title-updater-feature.js`
+    - 删除 1200ms 同步轮询，仅保留 history patch / popstate。
+    - 额外派发 `ced-route-change` 事件，供 content-script 在 SPA 路由切换时重绑观察根。
+  - `src/formula-copy-feature.js`
+    - 删除 body 级 MutationObserver。
+    - toast 改为单 timer。
+  - `src/markdown-patcher-feature.js`
+    - 删除 body 级 MutationObserver，改为显式 `refresh(root)`。
+  - `src/sidebar-autohide-feature.js`
+    - 删除 rebind interval，只保留 sidebar 相关 mutation 的 rAF 批处理。
+  - `src/history-cleaner-feature.js`
+    - 默认不再自带 observer 自动维持；ChatGPT 的自动归档逻辑收敛到 content-script/live window 策略里。
+- 存储与设置：
+  - `src/folder-feature.js`
+    - 已迁移为 `ced-folder-prefs-v2`（sync）+ `ced-folder-catalog-v2`（local）+ `ced-folder-storage-migrated-v2`。
+    - 兼容读取旧 `ced-folder-data-v1`，并统一记录 storage 错误。
+  - `src/popup.js` / `src/options.html` / `src/options.css`
+    - 新增“渲染导出范围”设置。
+    - 新增仅设置页可见的“诊断”卡片。
+- 产物与验证：
+  - `./scripts/build-crx.sh` 已通过，生成：
+    - `dist/threadatlas.zip`
+    - `dist/threadatlas.crx`
+  - `node --check` 未完成：当前 shell 环境中不存在 `node/nodejs/bun/deno`，因此无法执行 JS 语法检查；本轮只完成了人工高风险代码审查和打包验证。
+
+---
+
+## Iteration 32 Goal
+- 继续把 ChatGPT 的 round 索引与归档状态管理从 `content-script.js` 下沉到 `conversation-kernel.js`。
+- 先迁移“round 数据建模 / round store 同步 / turns<->rounds 扁平化 / 窗口状态快照”，保留真实 DOM 移动仍在 content-script。
+
+## Iteration 32 Plan
+- [x] 在 `conversation-kernel.js` 增加 round 级建模方法：group/build/renumber/flatten/find/capture state。
+- [x] 将 `content-script.js` 的 ChatGPT round store 同步逻辑改为调用 kernel。
+- [x] 将 `getKernelRoundsSnapshot()` / `collectTurnsFromHistoryRounds()` / `captureHistoryWindowState()` 改为读 kernel。
+- [x] 保持 DOM archive/restore 仍在 content-script，避免本轮引入跳转/导出回归。
+- [x] 重新打包并记录 review。
+
+## Iteration 32 Review
+- 下沉到 `conversation-kernel.js` 的能力：
+  - `groupTurnsIntoRounds()`
+  - `buildRoundSummary()`
+  - `buildRoundMarkerId()`
+  - `createRoundRecord()`
+  - `buildRounds()`
+  - `renumberRounds()`
+  - `flattenTurns()`
+  - `buildRoundSnapshots()`
+  - `findRoundByIdIn()`
+  - `getLatestWindowRange()`
+  - `captureWindowState()`
+  - `syncRoundStore()`
+- `src/content-script.js`
+  - `initConversationKernel()` 现在把 `cloneTurnForHistoryRound` 和 `measureHistoryRoundHeight` 作为 kernel 回调注入。
+  - 原来的 `group/build/renumber/flatten/find/capture state` 本地函数改成 kernel wrapper。
+  - `syncHistoryRoundStore()` 改为直接消费 kernel 返回的新 round store 和 window state。
+  - `applyLatestHistoryWindow()` 的 latest range 改为读 kernel，而不是 content-script 自己计算。
+- 边界说明：
+  - 本轮没有把 `archiveHistoryRound()` / `restoreHistoryRound()` / `applyHistoryWindowRange()` 下沉到 kernel。
+  - 这些函数仍依赖页面真实 DOM、scroll container 和 spacer 插入点，继续保留在 content-script 是有意的分层。
+- 验证：
+  - `./scripts/build-crx.sh` 已通过。
+  - `node --check` 仍无法执行，原因同 Iteration 31：当前环境没有 `node/nodejs/bun/deno`。
+
 ## Goal
 - 扫描并确认当前项目功能实现入口。
 - 去掉“站点结构变化，已启用降级导出模式”这类浏览器内提示。
@@ -625,6 +1053,141 @@
   - 时间轴在“latest window / focus window”切换时的高亮与跳转精度。
 
 ---
+
+
+## Iteration 30 Goal
+- 修复长会话下“导出不好使”的回归，优先恢复 `导出选中内容` 的语义正确性。
+- 区分“导出实现回归”和“浏览器 canvas 上限”两类问题，避免把所有失败都笼统归因于会话过长。
+- 为超长截图/PDF 导出增加明确的边界提示，而不是静默失败。
+
+## Iteration 30 Plan
+- [x] 梳理导出主链路，确认归档窗口化后 `exportSelection()` / render export 是否仍按选中轮次工作。
+- [x] 修复渲染型导出错误地回退到整条会话的问题。
+- [x] 为超长截图/PDF 渲染增加 canvas 尺寸保护与明确报错。
+- [x] 完成语法检查、打包验证，并补充本轮 review。
+
+## Iteration 30 Review
+- 根因定位：
+  - `exportSelection()` 语义是“导出选中内容”，但渲染型导出链路里 `buildFullHtmlDocument()` 与 `renderConversationCanvas()` 实际优先回退到了 `state.turns`，等于默认抓整条会话。
+  - 这会让长会话在 HTML / Word / Screenshot / PDF 导出时直接放大 DOM 克隆、图片内联和 canvas 渲染成本；哪怕用户只选了几轮，也会按全量会话处理。
+  - 对截图/PDF 来说，超长会话还会进一步撞上浏览器 canvas 边长/总像素限制，表现成“导出不好使”或无明确反馈。
+- 修复内容：
+  - `src/content-script.js`
+    - `buildFullHtmlDocument()` 改为优先使用调用方传入的 `turns`；只有显式传入当前 `state.turns` 时才按全量路径处理。
+    - `renderConversationCanvas()` 改为严格基于当前导出选择 `turns` 生成快照，不再无条件回退到整条会话。
+    - `exportScreenshot()` / `exportPdf()` 改为把当前选中轮次直接传给渲染器，恢复“导出选中内容”的真实语义。
+    - 新增 canvas 尺寸保护：当截图/PDF 的计划渲染尺寸超过浏览器可承受边界时，直接给出明确错误，引导改用更适合长会话的 HTML / Markdown / Word，或缩小选区。
+- 结论：
+  - 不是简单的“你的对话太长所以导不出”。
+  - 更准确地说，是此前渲染型导出把“全量会话”当成默认输入，长会话会把这个问题放大；修复后，选区导出会明显更稳。
+  - 如果你导的是整条超长会话的截图/PDF，依然可能触发浏览器 canvas 上限；这时会得到明确提示，而不是静默失败。
+- 静态验证：
+  - `node --check src/content-script.js`
+  - `./scripts/build-crx.sh`
+
+## Iteration 29 Goal
+- 解决裁剪后仍然严重卡顿的问题，重点是 ChatGPT 输入时的卡顿。
+- 搜索并参考官方技术资料，定位 content script/观察器/时间线/归档链路的性能热点。
+- 在不牺牲功能闭环的前提下，对输入期与长会话期的性能路径做减法。
+
+## Iteration 29 Plan
+- [x] 搜索官方技术资料，确认与浏览器扩展输入卡顿相关的性能约束。
+- [x] 梳理 `src/content-script.js` 中输入期可能触发的观察、刷新、归档、时间线更新链路。
+- [x] 实施最小但有效的性能优化，优先避免输入期无关刷新。
+- [x] 完成语法检查、打包验证，并补充本轮 review。
+
+## Iteration 29 Review
+- 官方资料依据：
+  - MDN `MutationObserver.observe()` 说明 `subtree: true` 会让目标节点整棵子树内的新增/移除都进入回调，因此观察根一旦过大，输入区 DOM 变化也会被持续送进扩展逻辑。
+  - MDN `requestIdleCallback()` 明确建议把后台/低优先级工作放到空闲期，避免影响输入与动画等延迟敏感路径。
+  - Chrome Developers 的 content scripts 文档强调内容脚本直接运行在页面 DOM 上，扩展自己的 DOM/观察/重排成本会直接叠加到宿主页面交互。
+- 根因梳理：
+  - 主内容脚本的 `MutationObserver` 之前会退回观察 `main`/滚动容器，并且 mutation 分类没有排除 composer/input subtree，导致输入时的 DOM 变化被误判为 `conversationChanged`。
+  - 一旦误判，后续会串起 `scheduleHistoryArchiveSync()`、`scheduleTimelineRefresh()`、`scheduleMetaRefresh()`，输入期即使没有新轮次也会重复做时间轴、归档和侧栏刷新。
+  - 另外 `sidebarAutoHide` 与 `folder` 的全局 body observer 也会在输入期接收整页 mutation，进一步放大主线程负担。
+- 本轮修复：
+  - `src/content-script.js`
+    - 新增 `COMPOSER_IGNORE_SELECTOR` 与 `isComposerOrInputElement()`，把 textarea/contenteditable/composer/chat-input 子树从会话与 meta mutation 分类中排除。
+    - 新增 `resolveConversationObserveContentRoot()`：优先根据当前消息轮次的最低公共祖先推导“消息内容根”，避免观察器轻易退回 `main` 把输入框一并纳入。
+    - `getConversationObserveTarget()` 回退顺序改为“消息内容根 -> 窄选择器 -> 再退回 main”，减少观察范围。
+    - `scheduleMetaRefresh()` 改为 `requestIdleCallback()` 优先、`setTimeout` 回退，把标题/文件夹这类低优先级刷新挪到空闲期。
+  - `src/sidebar-autohide-feature.js`
+    - 把“任何 body mutation 都立即 rebind 侧栏”改为“先判断 mutation 是否真的影响 sidebar，再在 `requestAnimationFrame` 中批量重绑”。
+    - 新增 composer/input 子树排除，避免输入期无意义侧栏重找。
+  - `src/folder-feature.js`
+    - 侧栏 observer 同样跳过 composer/input 相关 mutation，减少输入期无关扫描。
+- 预期效果：
+  - 输入问题时，不再因为 composer 里的节点变化触发整条会话刷新链。
+  - 自动裁剪仍然保留，但主要成本回到“真实新轮次产生时”，而不是每次键入。
+  - 侧栏相关模块保持可用，但从“整页常驻高频观察”退回到更窄的相关 mutation 响应。
+- 静态验证：
+  - `node --check src/content-script.js`
+  - `node --check src/sidebar-autohide-feature.js`
+  - `node --check src/folder-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/service-worker.js`
+  - `./scripts/build-crx.sh`
+
+## Iteration 28 Goal
+- 取消雪花动效默认开启，避免首次加载就出现装饰性干扰。
+- 参考优秀 popup 示例与官方约束，重构当前 popup UI，降低“抽象感”和信息噪声。
+- 保持 popup 作为高频控制面板，完整设置页继续承载长表单配置。
+
+## Iteration 28 Plan
+- [x] 确认雪花默认值链路与当前 popup/options 布局问题。
+- [x] 阅读优秀 popup 示例与官方设计约束，整理本项目可落地的 UI 原则。
+- [x] 关闭雪花默认开启，重做 popup/options 视觉层级、布局和文案。
+- [x] 完成语法检查、打包验证，并补充本轮 review。
+
+## Iteration 28 Review
+- 设计依据：
+  - 参考了 Chrome Developers 关于扩展 popup / user interface 的说明，以及 MDN WebExtensions 教程中的 popup 示例（如 Beastify 的简单动作面板）。
+  - 本轮采纳的原则是：popup 只承载瞬时状态与高频动作，不用大段品牌文案和重装饰背景抢首屏。
+- 默认值修正：
+  - `src/popup.js` 与 `src/content-script.js` 新增一次性迁移键 `ced-snow-effect-default-off-v1`。
+  - 雪花动效默认值改为关闭，并对已有安装做一次默认迁移，避免旧默认继续自动开启。
+- popup 重构：
+  - `src/popup.html` / `src/popup.css` 改为三段结构：顶部品牌与入口、当前页面状态卡、快速设置卡、页面动作卡。
+  - 移除大面积 hero 渐变和抽象文案，首屏直接呈现页面状态、时间轴/归档状态和可执行动作。
+  - popup 继续只保留高频控制；完整设置仍通过 `完整设置` 按钮进入 options 页面。
+- options 页收口：
+  - `src/options.html` / `src/options.css` 同步改为更克制的管理后台风格，统一语言为“阅读与导航 / 页面整理 / 本地同步”。
+  - 将 `Snow Effect` 改为 `雪花动效`，并明确说明“默认关闭，需要时再开启”。
+- 面板文案统一：
+  - `src/content-script.js` 页面内设置区标题由 `Snow Effect` 改为 `雪花动效`。
+- 静态验证：
+  - `node --check src/popup.js`
+  - `node --check src/content-script.js`
+  - `node --check src/service-worker.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`
+
+## Iteration 27 Goal
+- 修复 ChatGPT 页面初始化时的 `Maximum call stack size exceeded`。
+- 找出同步递归源，删除不必要的重入/自调用逻辑。
+- 在不扩大改动面的前提下恢复扩展稳定初始化。
+
+## Iteration 27 Plan
+- [x] 检查 `src/content-script.js` 初始化链路与相关 feature 装配，定位递归源。
+- [x] 实施最小化修复，移除导致同步重入的多余逻辑。
+- [x] 完成语法检查，并补充本轮 review。
+
+## Iteration 27 Review
+- 根因定位：
+  - `src/content-script.js` 中归档占位块函数存在同步递归：`updateHistoryRoundSpacer()` 调用 `ensureHistoryRoundSpacer()`，而 `ensureHistoryRoundSpacer()` 在已有 spacer 时又调用 `updateHistoryRoundSpacer()`。
+  - 该递归会在 ChatGPT 初始化阶段自动归档旧轮次时立即触发，因此报错表现为 `init failed RangeError: Maximum call stack size exceeded`。
+- 修复内容：
+  - `ensureHistoryRoundSpacer()` 改为只负责“确保存在并返回 spacer”，不再在已有 spacer 时反向调用 `updateHistoryRoundSpacer()`。
+  - 保留 `updateHistoryRoundSpacer()` 作为唯一的 spacer 状态/尺寸更新入口，消除同步调用环。
+- 影响范围：
+  - 仅修改 `src/content-script.js` 中历史归档 spacer 的职责边界，不改 popup、时间线 API、导出链路与其他 feature 行为。
+- 静态验证：
+  - `node --check src/content-script.js`
+  - `node --check src/popup.js`
+  - `node --check src/service-worker.js`
+  - `node --check src/timeline-feature.js`
+  - `./scripts/build-crx.sh`
 
 ## Iteration 26 Goal
 - 重新命名产品并重做图标，统一扩展品牌观感。

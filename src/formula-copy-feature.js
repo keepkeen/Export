@@ -131,12 +131,10 @@
       this.initialized = false;
       this.format = 'latex';
       this.toastDuration = 1400;
-      this.hydrateTimer = null;
-      this.mutationObserver = null;
       this.toastEl = null;
+      this.toastTimer = null;
 
       this.handleClick = this.handleClick.bind(this);
-      this.handleMutations = this.handleMutations.bind(this);
     }
 
     initialize(options = {}) {
@@ -154,20 +152,15 @@
 
       document.addEventListener('click', this.handleClick, true);
       this.refresh(document);
-      this.observeMutations();
       this.initialized = true;
     }
 
     destroy() {
       if (!this.initialized) return;
       document.removeEventListener('click', this.handleClick, true);
-      if (this.mutationObserver) {
-        this.mutationObserver.disconnect();
-        this.mutationObserver = null;
-      }
-      if (this.hydrateTimer) {
-        clearTimeout(this.hydrateTimer);
-        this.hydrateTimer = null;
+      if (this.toastTimer) {
+        clearTimeout(this.toastTimer);
+        this.toastTimer = null;
       }
       this.initialized = false;
     }
@@ -179,28 +172,6 @@
 
     refresh(root = document) {
       this.hydrateFormulaNodes(root);
-    }
-
-    observeMutations() {
-      if (this.mutationObserver) {
-        this.mutationObserver.disconnect();
-      }
-
-      const target = document.body || document.documentElement;
-      if (!target) return;
-
-      this.mutationObserver = new MutationObserver(this.handleMutations);
-      this.mutationObserver.observe(target, { childList: true, subtree: true });
-    }
-
-    handleMutations() {
-      if (this.hydrateTimer) {
-        clearTimeout(this.hydrateTimer);
-      }
-      this.hydrateTimer = setTimeout(() => {
-        this.hydrateTimer = null;
-        this.refresh(document);
-      }, 160);
     }
 
     getFormulaRoots(root) {
@@ -324,6 +295,12 @@
       if (!(formulaNode instanceof HTMLElement)) return;
       if (event.defaultPrevented) return;
 
+      // 检查点击目标是否为可交互元素（链接、按钮等），如果是则不拦截
+      const interactiveTarget = event.target.closest('a, button, input, textarea, select, [role="button"], [tabindex="0"]');
+      if (interactiveTarget && interactiveTarget !== formulaNode && !formulaNode.contains(interactiveTarget)) {
+        return; // 允许默认行为
+      }
+
       event.preventDefault();
       event.stopPropagation();
 
@@ -414,7 +391,11 @@
       void toast.offsetWidth;
       toast.classList.add('ced-formula-copy-toast--visible');
 
-      setTimeout(() => {
+      if (this.toastTimer) {
+        clearTimeout(this.toastTimer);
+      }
+      this.toastTimer = setTimeout(() => {
+        this.toastTimer = null;
         toast.classList.remove('ced-formula-copy-toast--visible');
       }, this.toastDuration);
     }
