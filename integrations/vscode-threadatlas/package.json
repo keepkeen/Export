@@ -1,0 +1,75 @@
+{
+  "name": "threadatlas-vscode-bridge",
+  "displayName": "ThreadAtlas VSCode Bridge",
+  "description": "Expose active VSCode workspace context to the ThreadAtlas browser extension over localhost.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:threadatlas.startBridge",
+    "onCommand:threadatlas.stopBridge",
+    "onCommand:threadatlas.showBridgeStatus"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "threadatlas.startBridge",
+        "title": "ThreadAtlas: Start Local Bridge"
+      },
+      {
+        "command": "threadatlas.stopBridge",
+        "title": "ThreadAtlas: Stop Local Bridge"
+      },
+      {
+        "command": "threadatlas.showBridgeStatus",
+        "title": "ThreadAtlas: Show Bridge Status"
+      }
+    ],
+    "configuration": {
+      "title": "ThreadAtlas",
+      "properties": {
+        "threadatlas.bridge.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the local ThreadAtlas bridge when VSCode launches."
+        },
+        "threadatlas.bridge.port": {
+          "type": "number",
+          "default": 3030,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The localhost port exposed to the ThreadAtlas browser extension."
+        },
+        "threadatlas.bridge.selectionMaxChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 400,
+          "maximum": 50000,
+          "description": "Maximum number of characters captured from the current selection."
+        },
+        "threadatlas.bridge.excerptLineRadius": {
+          "type": "number",
+          "default": 24,
+          "minimum": 4,
+          "maximum": 120,
+          "description": "How many lines around the current cursor are exposed when there is no explicit selection."
+        },
+        "threadatlas.bridge.excerptMaxChars": {
+          "type": "number",
+          "default": 6000,
+          "minimum": 300,
+          "maximum": 30000,
+          "description": "Maximum number of characters captured for cursor-centered excerpts."
+        }
+      }
+    }
+  }
+}

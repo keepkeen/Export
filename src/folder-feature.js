@@ -217,6 +217,7 @@
         section: null,
         currentTitle: null,
         currentSelect: null,
+        currentActions: null,
         createName: null,
         createColor: null,
         createButton: null,
@@ -226,6 +227,7 @@
         sidebarSection: null,
         sidebarCurrentTitle: null,
         sidebarCurrentSelect: null,
+        sidebarCurrentActions: null,
         sidebarSortSelect: null,
         sidebarConversationList: null,
         sidebarCreateButton: null,
@@ -250,6 +252,16 @@
       this.handleSidebarCreateInputKeydown = this.handleSidebarCreateInputKeydown.bind(this);
       this.handleSelectInteractionStart = this.handleSelectInteractionStart.bind(this);
       this.handleSelectInteractionEnd = this.handleSelectInteractionEnd.bind(this);
+      this.handleCurrentActionsClick = this.handleCurrentActionsClick.bind(this);
+      this.handleSidebarCurrentActionsClick = this.handleSidebarCurrentActionsClick.bind(this);
+    }
+
+    isConversationRouteActive() {
+      return !!normalizeText(
+        this.currentConversationId
+        || extractConversationIdFromUrl(location.pathname)
+        || extractConversationIdFromUrl(location.href)
+      );
     }
 
     async initialize(options = {}) {
@@ -417,7 +429,8 @@
         <div class="ced-folder-current">
           <div class="ced-folder-current__title">当前会话</div>
           <div class="ced-folder-current__name" data-role="current-title">未识别到会话</div>
-          <select class="ced-input ced-folder-current__select" data-role="current-select"></select>
+          <div class="ced-folder-assign-list" data-role="current-actions"></div>
+          <select class="ced-input ced-folder-current__select" data-role="current-select" hidden></select>
         </div>
         <div class="ced-folder-create">
           <input class="ced-input ced-folder-create__name" data-role="create-name" placeholder="新建文件夹名称">
@@ -441,6 +454,7 @@
       this.ui.section = section;
       this.ui.currentTitle = section.querySelector('[data-role="current-title"]');
       this.ui.currentSelect = section.querySelector('[data-role="current-select"]');
+      this.ui.currentActions = section.querySelector('[data-role="current-actions"]');
       this.ui.createName = section.querySelector('[data-role="create-name"]');
       this.ui.createColor = section.querySelector('[data-role="create-color"]');
       this.ui.createButton = section.querySelector('[data-role="create-folder"]');
@@ -451,6 +465,7 @@
       this.ui.createButton?.addEventListener('click', this.handleCreateFolder);
       this.ui.sortSelect?.addEventListener('change', this.handleSortChange);
       this.ui.currentSelect?.addEventListener('change', this.handleCurrentFolderChange);
+      this.ui.currentActions?.addEventListener('click', this.handleCurrentActionsClick);
       this.ui.folderList?.addEventListener('click', this.handleFolderListClick);
       this.ui.conversationList?.addEventListener('click', this.handleConversationListClick);
       this.ui.section?.addEventListener('pointerdown', this.handleSelectInteractionStart, true);
@@ -471,6 +486,9 @@
     }
 
     findSidebarHost() {
+      if (!this.isConversationRouteActive()) {
+        return null;
+      }
       const conversationAnchors = Array.from(
         document.querySelectorAll('a[href^="/c/"], a[href*="/c/"]')
       ).filter((anchor) => anchor instanceof HTMLAnchorElement);
@@ -818,14 +836,24 @@
         return;
       }
       const exists = this.data.folders.some((folder) => normalizeText(folder.name).toLowerCase() === nextName.toLowerCase());
+      let targetFolderId = '';
       if (!exists) {
+        targetFolderId = uid('folder');
         this.data.folders.push({
-          id: uid('folder'),
+          id: targetFolderId,
           name: nextName,
           color: '#41d1ff',
           createdAt: Date.now(),
         });
         this.data.folders.sort((a, b) => a.createdAt - b.createdAt);
+      } else {
+        targetFolderId = this.data.folders.find((folder) => normalizeText(folder.name).toLowerCase() === nextName.toLowerCase())?.id || '';
+      }
+      if (this.currentConversationId && targetFolderId) {
+        this.data.conversationFolders[this.currentConversationId] = targetFolderId;
+        this.notifyCurrentFolderChange();
+      }
+      if (!exists || (this.currentConversationId && targetFolderId)) {
         this.persistDataDebounced();
         this.render();
       }
@@ -852,10 +880,22 @@
       }
     }
 
+    detachSidebarSection() {
+      this.bindSidebarHost(null);
+      this.handleNativeDragEnd();
+      if (this.ui.sidebarSection?.parentNode) {
+        this.ui.sidebarSection.parentNode.removeChild(this.ui.sidebarSection);
+      }
+    }
+
     ensureSidebarSection() {
+      if (!this.isConversationRouteActive()) {
+        this.detachSidebarSection();
+        return;
+      }
       const host = this.findSidebarHost();
       if (!host) {
-        this.bindSidebarHost(null);
+        this.detachSidebarSection();
         return;
       }
       this.bindSidebarHost(host);
@@ -879,7 +919,8 @@
           <input class="ced-folder-sidebar__create-input" data-role="sidebar-create-input" placeholder="输入文件夹名后回车或点外部创建">
         </div>
         <div class="ced-folder-sidebar__current-title" data-role="sidebar-current-title">未识别到会话</div>
-        <select class="ced-folder-sidebar__select" data-role="sidebar-current-select"></select>
+        <div class="ced-folder-assign-list ced-folder-assign-list--compact" data-role="sidebar-current-actions"></div>
+        <select class="ced-folder-sidebar__select" data-role="sidebar-current-select" hidden></select>
         <div class="ced-folder-sidebar__sort">
           <span>排序</span>
           <select class="ced-folder-sidebar__sort-select" data-role="sidebar-sort-select">
@@ -895,6 +936,7 @@
       this.ui.sidebarSection = section;
       this.ui.sidebarCurrentTitle = section.querySelector('[data-role="sidebar-current-title"]');
       this.ui.sidebarCurrentSelect = section.querySelector('[data-role="sidebar-current-select"]');
+      this.ui.sidebarCurrentActions = section.querySelector('[data-role="sidebar-current-actions"]');
       this.ui.sidebarSortSelect = section.querySelector('[data-role="sidebar-sort-select"]');
       this.ui.sidebarConversationList = section.querySelector('[data-role="sidebar-conversation-list"]');
       this.ui.sidebarCreateButton = section.querySelector('[data-action="create-folder"]');
@@ -902,6 +944,7 @@
       this.ui.sidebarCreateInput = section.querySelector('[data-role="sidebar-create-input"]');
 
       this.ui.sidebarCurrentSelect?.addEventListener('change', this.handleSidebarCurrentFolderChange);
+      this.ui.sidebarCurrentActions?.addEventListener('click', this.handleSidebarCurrentActionsClick);
       this.ui.sidebarSortSelect?.addEventListener('change', this.handleSidebarSortChange);
       this.ui.sidebarSection?.addEventListener('click', this.handleSidebarClick);
       this.ui.sidebarSection?.addEventListener('pointerdown', this.handleSelectInteractionStart, true);
@@ -927,20 +970,28 @@
 
       const existing = this.data.folders.find((folder) => normalizeText(folder.name).toLowerCase() === name.toLowerCase());
       if (existing) {
+        if (this.currentConversationId) {
+          this.assignCurrentConversation(existing.id);
+        }
         nameInput.value = '';
         return;
       }
 
+      const folderId = uid('folder');
       this.data.folders.push({
-        id: uid('folder'),
+        id: folderId,
         name,
         color: clampColor(colorInput.value),
         createdAt: Date.now(),
       });
       this.data.folders.sort((a, b) => a.createdAt - b.createdAt);
+      if (this.currentConversationId) {
+        this.data.conversationFolders[this.currentConversationId] = folderId;
+      }
       nameInput.value = '';
       this.persistDataDebounced();
       this.render();
+      this.notifyCurrentFolderChange();
     }
 
     handleSortChange(event) {
@@ -1007,6 +1058,18 @@
       const select = event.target;
       if (!(select instanceof HTMLSelectElement)) return;
       this.assignCurrentConversation(select.value || '');
+    }
+
+    handleCurrentActionsClick(event) {
+      const button = event.target instanceof HTMLElement ? event.target.closest('button[data-folder-id]') : null;
+      if (!(button instanceof HTMLButtonElement)) return;
+      this.assignCurrentConversation(button.dataset.folderId || '');
+    }
+
+    handleSidebarCurrentActionsClick(event) {
+      const button = event.target instanceof HTMLElement ? event.target.closest('button[data-folder-id]') : null;
+      if (!(button instanceof HTMLButtonElement)) return;
+      this.assignCurrentConversation(button.dataset.folderId || '');
     }
 
     handleSidebarSortChange(event) {
@@ -1186,6 +1249,9 @@
         selectedFolderId,
         !this.currentConversationId
       );
+      if (this.ui.currentActions instanceof HTMLElement) {
+        this.ui.currentActions.innerHTML = this.buildCurrentFolderActionsHtml(selectedFolderId, !this.currentConversationId);
+      }
     }
 
     renderSidebarCurrentConversation() {
@@ -1202,6 +1268,29 @@
         selectedFolderId,
         !this.currentConversationId
       );
+      if (this.ui.sidebarCurrentActions instanceof HTMLElement) {
+        this.ui.sidebarCurrentActions.innerHTML = this.buildCurrentFolderActionsHtml(selectedFolderId, !this.currentConversationId);
+      }
+    }
+
+    buildCurrentFolderActionsHtml(selectedFolderId, disabled) {
+      const currentFolderId = normalizeText(selectedFolderId || '');
+      const disabledAttr = disabled ? ' disabled' : '';
+      const chips = [
+        `<button type="button" class="ced-folder-assign-chip${currentFolderId ? '' : ' is-active'}" data-folder-id=""${disabledAttr}>未分组</button>`,
+        ...this.data.folders.map((folder) => `
+          <button
+            type="button"
+            class="ced-folder-assign-chip${folder.id === currentFolderId ? ' is-active' : ''}"
+            data-folder-id="${escapeHtml(folder.id)}"
+            ${disabledAttr}
+          >
+            <span class="ced-folder-assign-chip__dot" style="--folder-color:${folder.color};"></span>
+            <span>${escapeHtml(folder.name)}</span>
+          </button>
+        `),
+      ];
+      return chips.join('');
     }
 
     renderFolderList() {
@@ -1366,6 +1455,14 @@
 
     render() {
       this.ensureSidebarSection();
+      const visible = this.isConversationRouteActive();
+      if (this.ui.section instanceof HTMLElement) {
+        this.ui.section.hidden = !visible;
+      }
+      if (!visible) {
+        this.hasRendered = true;
+        return;
+      }
       if (!this.ui.section && !this.ui.sidebarSection) return;
       this.renderCurrentConversation();
       this.renderSidebarCurrentConversation();
@@ -1400,6 +1497,9 @@
       if (this.ui.currentSelect) {
         this.ui.currentSelect.removeEventListener('change', this.handleCurrentFolderChange);
       }
+      if (this.ui.currentActions) {
+        this.ui.currentActions.removeEventListener('click', this.handleCurrentActionsClick);
+      }
       if (this.ui.folderList) {
         this.ui.folderList.removeEventListener('click', this.handleFolderListClick);
       }
@@ -1408,6 +1508,9 @@
       }
       if (this.ui.sidebarCurrentSelect) {
         this.ui.sidebarCurrentSelect.removeEventListener('change', this.handleSidebarCurrentFolderChange);
+      }
+      if (this.ui.sidebarCurrentActions) {
+        this.ui.sidebarCurrentActions.removeEventListener('click', this.handleSidebarCurrentActionsClick);
       }
       if (this.ui.sidebarSortSelect) {
         this.ui.sidebarSortSelect.removeEventListener('change', this.handleSidebarSortChange);
@@ -1448,6 +1551,7 @@
         section: null,
         currentTitle: null,
         currentSelect: null,
+        currentActions: null,
         createName: null,
         createColor: null,
         createButton: null,
@@ -1457,6 +1561,7 @@
         sidebarSection: null,
         sidebarCurrentTitle: null,
         sidebarCurrentSelect: null,
+        sidebarCurrentActions: null,
         sidebarSortSelect: null,
         sidebarConversationList: null,
         sidebarCreateButton: null,

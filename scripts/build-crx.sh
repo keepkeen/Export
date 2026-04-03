@@ -3,10 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
-UNPACKED="$DIST/unpacked"
 ZIP_PATH="$DIST/threadatlas.zip"
 CRX_PATH="$DIST/threadatlas.crx"
-PROFILE_DIR="$DIST/.chrome-profile"
 DEFAULT_KEY="$ROOT/certs/threadatlas.pem"
 LEGACY_KEY="$ROOT/certs/chronochat-studio.pem"
 KEY_PATH="${KEY_PATH:-$DEFAULT_KEY}"
@@ -14,8 +12,21 @@ if [[ "$KEY_PATH" == "$DEFAULT_KEY" && ! -f "$KEY_PATH" && -f "$LEGACY_KEY" ]]; 
   KEY_PATH="$LEGACY_KEY"
 fi
 
-rm -rf "$UNPACKED" "$ZIP_PATH" "$CRX_PATH" "$PROFILE_DIR"
-mkdir -p "$UNPACKED" "$DIST"
+mkdir -p "$DIST"
+WORK_ROOT="$(mktemp -d "$DIST/.build.XXXXXX")"
+UNPACKED="$WORK_ROOT/unpacked"
+PROFILE_DIR="$WORK_ROOT/.chrome-profile"
+mkdir -p "$UNPACKED"
+
+cleanup() {
+  if [[ -n "${WORK_ROOT:-}" && -d "${WORK_ROOT:-}" ]]; then
+    find "$WORK_ROOT" -depth -mindepth 1 \
+      \( -type f -o -type l \) -exec unlink {} \; \
+      -o -type d -exec rmdir {} \; 2>/dev/null || true
+    rmdir "$WORK_ROOT" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 cp "$ROOT/manifest.json" "$UNPACKED/"
 cp "$ROOT/README.md" "$UNPACKED/"
@@ -24,8 +35,10 @@ cp -R "$ROOT/icons" "$UNPACKED/"
 cp -R "$ROOT/vendor" "$UNPACKED/"
 
 pushd "$UNPACKED" >/dev/null
-zip -qr "$ZIP_PATH" .
+TMP_ZIP="$WORK_ROOT/threadatlas.zip"
+zip -qr "$TMP_ZIP" .
 popd >/dev/null
+mv -f "$TMP_ZIP" "$ZIP_PATH"
 
 echo "✅ Packed ZIP at $ZIP_PATH"
 
@@ -66,7 +79,6 @@ MSG
   exit 0
 fi
 
-mkdir -p "$PROFILE_DIR"
 "$BROWSER_BIN" \
   --pack-extension="$UNPACKED" \
   --pack-extension-key="$KEY_PATH" \
@@ -80,10 +92,8 @@ mkdir -p "$PROFILE_DIR"
   }
 
 if [[ -f "$UNPACKED.crx" ]]; then
-  mv "$UNPACKED.crx" "$CRX_PATH"
+  mv -f "$UNPACKED.crx" "$CRX_PATH"
   echo "📦  生成 CRX => $CRX_PATH"
 else
   echo "⚠️  未找到 $UNPACKED.crx，可能是浏览器版本不支持 --pack-extension。" >&2
 fi
-
-rm -rf "$PROFILE_DIR"

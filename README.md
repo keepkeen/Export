@@ -1,93 +1,82 @@
 # ThreadAtlas
 
-ThreadAtlas is a Chrome/Edge Manifest V3 extension for thread-first navigation, workspace organization, and export across modern chat products.
+ThreadAtlas is a Chrome/Edge Manifest V3 extension focused on long-form chat navigation, workspace organization, export, and local IDE context bridging.
 
-The product is intentionally ChatGPT-first for advanced interaction design. Gemini, Claude, and Grok remain supported for export-oriented flows, while the richer workspace layer is tuned primarily for ChatGPT.
+The product is intentionally ChatGPT-first. Gemini, Claude, and Grok remain supported for export-oriented flows, but the richer workspace features are built primarily for ChatGPT conversation pages.
 
-## Highlights
+## What It Does
 
-### ChatGPT-first workspace
+### ChatGPT-first reading and navigation
 
-- Right-side timeline navigation
-  - Uniform round distribution for long conversations
-  - `flow` / `jump` scroll modes
-  - Active round tracking while scrolling
-  - Preview and export workspace around the timeline
-- Native archived history windowing
-  - The extension builds a full round index when a conversation loads
-  - Only the latest window stays live by default, older rounds are archived into an in-memory pool
-  - Clicking an archived marker restores native ChatGPT DOM around that round instead of showing an extension-only lightweight viewer
-  - Default strategy keeps the latest `10` rounds live and restores a focused window around historical targets on demand
-- Formula copy
-  - Hover only highlights the formula body
-  - Click to copy instantly
-  - Formats: `LaTeX`, `LaTeX (No $)`, `MathML`
-- Workspace modules
-  - Sidebar folders inside the native ChatGPT sidebar
-  - Prompt Vault
-  - Title Updater
-  - Sidebar auto-hide
-  - Folder spacing control
-  - Markdown patcher
-  - Snow effect
-  - History Cleaner policy controls
-- Export
-  - In-page export panel with turn selection
-  - Timeline-side preview/export affordances
-  - Formats: `txt`, `md`, `png`, `pdf`, `doc`, `html`, `json`, `xls`, `csv`
+- Right-side timeline for long conversations
+- Active round tracking while scrolling
+- `flow` / `jump` scroll modes
+- Timeline-side quick preview and export entry points
+- Archived-history windowing so long threads stay lighter without losing jump targets
 
-### Other supported sites
+### ChatGPT workspace layer
 
-- Supported hosts:
-  - `chatgpt.com`, `chat.openai.com`
-  - `gemini.google.com`
-  - `claude.ai`, `*.claude.ai`
-  - `grok.com`, `*.grok.com`
-- Export flows work across these hosts. ChatGPT receives the primary investment for timeline, folders, archive recovery, and other workspace behaviors.
+- Sidebar folders inside the native ChatGPT sidebar
+- Prompt Vault
+- Title updater
+- Sidebar auto-hide
+- Folder spacing control
+- Markdown patcher
+- Snow effect
+- History cleaner policy controls
 
-## UI model
+### Export
 
-- Action popup
-  - Compact, high-frequency control surface
-  - Current-page status summary
-  - Quick toggles for timeline, archive policy, formula copy, and local sync
-  - Entry point to the full settings page
-- Options page
-  - Full settings center for long-form configuration
-  - Better suited to browser extension layout constraints than overloading the action popup
-- In-page UI
-  - Right-side timeline
-  - In-page export panel
-  - Sidebar folder grouping inside ChatGPT
+- In-page export panel with turn selection
+- Formats: `txt`, `md`, `png`, `pdf`, `doc`, `html`, `json`, `xls`, `csv`
 
-## Interaction model
+### Local VSCode Bridge
+
+- Reads the current VSCode workspace through a local extension
+- Surfaces active file, current selection, dirty files, diagnostics, and git summary
+- Shows a compact VSCode context bar above the ChatGPT composer
+- Auto-attaches only unsent context blocks when you send a message
+- Does not require the OpenAI API
+
+## Supported Sites
+
+- `chatgpt.com`
+- `chat.openai.com`
+- `gemini.google.com`
+- `claude.ai`
+- `*.claude.ai`
+- `grok.com`
+- `*.grok.com`
+
+Current product focus:
+
+- ChatGPT: timeline, folders, archived-history recovery, composer-side VSCode context
+- Gemini / Claude / Grok: export-first support
+
+## How It Works
+
+### Browser extension only
+
+Use this if you just want chat navigation, folders, and export:
 
 1. Open a supported chat page.
-2. Use the action popup for quick toggles and page status.
-3. Open the options page when you need the full settings surface.
-4. Use the in-page timeline to move across rounds.
-5. Let the archive windowing keep the page light while preserving complete timeline history.
-6. Export from the in-page panel when you need a durable artifact.
+2. Use the popup to configure timeline, reading, export, and local sync settings.
+3. Use the in-page timeline and workspace UI on the chat page.
 
-## History windowing
+### Browser extension + VSCode Bridge
 
-ThreadAtlas does not treat cleanup as simple deletion.
+Use this if you want ChatGPT Web to reuse your current VSCode context:
 
-On ChatGPT, the extension now separates round indexing from live DOM presence:
-
-- A complete round index is built for the conversation.
-- Older rounds can be archived out of the visible DOM into an in-memory archive pool.
-- The page keeps lightweight spacers so scroll mapping and timeline positions remain stable.
-- When you jump to an archived round, the extension restores the surrounding native ChatGPT nodes and then scrolls to the real round.
-- Returning to the latest area re-applies the latest live window policy.
-
-Current boundaries:
-
-- Archive state lives in the current tab memory only.
-- Refreshing the page rebuilds the round index from the host page again.
-- Browser-page interaction still needs real-page validation after changes because host DOMs shift frequently.
+1. Run the VSCode bridge from [`integrations/vscode-threadatlas`](./integrations/vscode-threadatlas).
+2. Enable `本地同步` in the browser extension popup.
+3. Open a real ChatGPT conversation page such as `https://chatgpt.com/c/<conversation-id>`.
+4. The composer shows a VSCode context bar when the local bridge is online.
+5. If you have a selection in VSCode, that selection becomes the default reference block.
+6. When you send a message, ThreadAtlas asks the local bridge for unsent context only, then marks those blocks as sent for the current conversation.
 
 ## Installation
+
+### Browser extension
 
 1. Open:
    - Chrome: `chrome://extensions`
@@ -96,7 +85,22 @@ Current boundaries:
 3. Click `Load unpacked`
 4. Select this project directory
 
+### VSCode Bridge
+
+1. Open [`integrations/vscode-threadatlas`](./integrations/vscode-threadatlas) in VSCode.
+2. Press `F5` to run it in an Extension Development Host.
+3. Keep the bridge port aligned with the popup setting in ThreadAtlas.
+
+Optional packaging:
+
+```bash
+cd integrations/vscode-threadatlas
+npx @vscode/vsce package
+```
+
 ## Build
+
+### Browser extension
 
 ```bash
 ./scripts/build-crx.sh
@@ -112,7 +116,11 @@ Optional environment variables:
 - `CHROME_BIN=/path/to/chrome`
 - `KEY_PATH=/path/to/private-key.pem`
 
-## Main files
+### VSCode Bridge preview package
+
+The bridge folder can be zipped or packaged separately. For quick local verification, the repository also supports creating preview zips during validation.
+
+## Main Files
 
 - `manifest.json`
 - `src/content-script.js`
@@ -120,26 +128,21 @@ Optional environment variables:
 - `src/popup.html`
 - `src/popup.css`
 - `src/popup.js`
-- `src/options.html`
-- `src/options.css`
 - `src/timeline-feature.js`
-- `src/history-cleaner-feature.js`
-- `src/formula-copy-feature.js`
 - `src/folder-feature.js`
-- `src/prompt-vault-feature.js`
-- `src/title-updater-feature.js`
-- `src/sidebar-autohide-feature.js`
-- `src/folder-spacing-feature.js`
-- `src/markdown-patcher-feature.js`
-- `src/snow-effect-feature.js`
+- `src/history-archive-controller.js`
+- `src/history-cleaner-feature.js`
+- `src/context-sync-feature.js`
 - `src/styles.css`
+- `integrations/vscode-threadatlas/package.json`
+- `integrations/vscode-threadatlas/extension.js`
 
-## Notes
+## Boundaries
 
-- ChatGPT is the primary target for timeline and workspace behavior.
-- Host DOMs change frequently; selectors and mount points still require maintenance.
-- Static validation and packaging can be automated here, but real browser interaction still needs page-level verification.
-- All export and enhancement logic runs locally inside the extension context.
+- ChatGPT DOMs change frequently, so selectors and mount points still need maintenance.
+- Real browser interaction still requires page-level verification after UI changes.
+- VSCode Bridge only exposes local context over `127.0.0.1`; it is not a remote sync service.
+- Sent-context de-dup is scoped per conversation and based on item identity/content hash, not semantic diffing.
 
 ## License
 

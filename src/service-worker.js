@@ -69,6 +69,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     );
     return true;
   }
+  if (message.type === 'CED_CONTEXT_SYNC_ACTIVE_CONTEXT') {
+    getContextSyncActiveContext(message).then(
+      (result) => sendResponse(result),
+      (error) => sendResponse({ ok: false, error: error?.message || String(error) })
+    );
+    return true;
+  }
+  if (message.type === 'CED_CONTEXT_SYNC_PREPARE') {
+    prepareContextSyncPayload(message).then(
+      (result) => sendResponse(result),
+      (error) => sendResponse({ ok: false, error: error?.message || String(error) })
+    );
+    return true;
+  }
+  if (message.type === 'CED_CONTEXT_SYNC_MARK_SENT') {
+    markContextSyncPayloadSent(message).then(
+      (result) => sendResponse(result),
+      (error) => sendResponse({ ok: false, error: error?.message || String(error) })
+    );
+    return true;
+  }
   if (message.type === 'CED_CONTEXT_SYNC_PUSH') {
     pushContextSyncPayload(message).then(
       (result) => sendResponse(result),
@@ -106,62 +127,108 @@ async function resolveContextSyncTarget(message) {
   const settings = await readContextSyncSettings();
   const enabled = settings[STORAGE_KEYS.contextSyncEnabled] === true;
   const port = normalizeContextSyncPort(message?.port ?? settings[STORAGE_KEYS.contextSyncPort]);
-  const url = `http://127.0.0.1:${port}/sync`;
-  return { enabled, port, url };
+  const baseUrl = `http://127.0.0.1:${port}`;
+  return { enabled, port, baseUrl };
 }
 
-async function checkContextSyncServer(message) {
-  const { enabled, url } = await resolveContextSyncTarget(message);
+async function fetchContextSyncJson(message, path, options = {}) {
+  const { enabled, port, baseUrl } = await resolveContextSyncTarget(message);
   if (!enabled) {
-    return { ok: false, error: 'context sync disabled' };
+    return { ok: false, error: 'context sync disabled', port };
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 500);
+  const timeoutMs = Math.max(300, Number(options.timeoutMs) || 1200);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+
   try {
     const response = await fetch(url, {
-      method: 'GET',
+      method: options.method || 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {})
+      },
+      cache: 'no-store',
+      mode: 'cors',
       signal: controller.signal,
-      cache: 'no-store'
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined
     });
-    return { ok: response.ok };
-  } catch (_error) {
-    return { ok: false };
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (_error) {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: data?.error || `HTTP ${response.status}`,
+        status: response.status,
+        data,
+        port
+      };
+    }
+
+    if (data && typeof data === 'object') {
+      return { ...data, ok: data.ok !== false, port };
+    }
+    return { ok: true, data, port };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error), port };
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
+async function checkContextSyncServer(message) {
+  return fetchContextSyncJson(message, '/health', { timeoutMs: 700 });
+}
+
+async function getContextSyncActiveContext(message) {
+  return fetchContextSyncJson(message, '/active-context', { timeoutMs: 1200 });
+}
+
+async function prepareContextSyncPayload(message) {
+  return fetchContextSyncJson(message, '/conversation/prepare', {
+    method: 'POST',
+    timeoutMs: 2000,
+    body: {
+      conversationId: message?.conversationId || '',
+      pageUrl: message?.pageUrl || '',
+      draft: message?.draft || '',
+      site: message?.site || 'chatgpt'
+    }
+  });
+}
+
+async function markContextSyncPayloadSent(message) {
+  return fetchContextSyncJson(message, '/conversation/mark-sent', {
+    method: 'POST',
+    timeoutMs: 1200,
+    body: {
+      conversationId: message?.conversationId || '',
+      itemIds: Array.isArray(message?.itemIds) ? message.itemIds : []
+    }
+  });
+}
+
 async function pushContextSyncPayload(message) {
-  const { enabled, url } = await resolveContextSyncTarget(message);
-  if (!enabled) {
-    return { ok: false, error: 'context sync disabled' };
-  }
   const payload = Array.isArray(message?.payload) ? message.payload : [];
   if (!payload.length) {
     return { ok: false, error: 'empty payload' };
   }
-
-  const response = await fetch(url, {
+  const response = await fetchContextSyncJson(message, '/sync', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    mode: 'cors',
-    body: JSON.stringify(payload)
+    timeoutMs: 2000,
+    body: payload
   });
-
-  if (!response.ok) {
-    return { ok: false, error: `HTTP ${response.status}` };
+  if (!response?.ok) {
+    return response;
   }
-
-  let data = null;
-  try {
-    data = await response.json();
-  } catch (_error) {
-    data = null;
-  }
-  return { ok: true, count: payload.length, data };
+  return { ok: true, count: payload.length, data: response.data || response };
 }
 
 async function fetchAsDataURL(url) {

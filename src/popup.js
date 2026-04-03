@@ -667,8 +667,8 @@ function renderHeroSummary() {
     }
 
     const syncState = !state.settings[STORAGE_KEYS.contextSyncEnabled]
-      ? '本地同步未启用'
-      : (state.contextSyncOnline ? '本地同步已在线' : '本地同步等待服务');
+      ? 'VSCode Bridge 未启用'
+      : (state.contextSyncOnline ? 'VSCode Bridge 已在线' : 'VSCode Bridge 等待服务');
     els.summary.textContent = `当前页已连接，可直接调整时间轴、公式复制和页面整理能力；${syncState}。`;
   }
 }
@@ -765,7 +765,7 @@ async function handleContextSyncPush() {
 
   els.contextSyncPush.disabled = true;
   const previousText = els.contextSyncPush.textContent;
-  els.contextSyncPush.textContent = '同步中...';
+  els.contextSyncPush.textContent = '推送中...';
 
   try {
     const captureResponse = await sendMessageToCurrentTab(
@@ -786,13 +786,13 @@ async function handleContextSyncPush() {
       throw new Error(pushResponse?.error || '同步失败');
     }
 
-    setStatus(`同步成功（${pushResponse.count || captureResponse.payload.length || 0} 条）`);
+    setStatus(`网页会话已推送（${pushResponse.count || captureResponse.payload.length || 0} 条）`);
     setContextSyncOnline(true);
   } catch (error) {
-    setStatus(error?.message || '同步失败', true);
+    setStatus(error?.message || '推送失败', true);
     await refreshContextSyncStatus();
   } finally {
-    els.contextSyncPush.textContent = previousText || '同步当前会话';
+    els.contextSyncPush.textContent = previousText || '推送当前网页会话';
     renderContextSyncControls();
   }
 }

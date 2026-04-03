@@ -9,39 +9,36 @@
   <body class="popup-page">
     <main class="popup-shell">
       <header class="popup-header">
-        <div class="popup-brand">
-          <span class="popup-brand__mark" aria-hidden="true"></span>
-          <div class="popup-brand__meta">
-            <h1 class="popup-brand__title">ThreadAtlas</h1>
-            <p class="popup-brand__hint" id="popup-tab-hint">当前页：检测中...</p>
-          </div>
+        <div class="popup-header__main">
+          <p class="popup-header__eyebrow">ThreadAtlas</p>
+          <h1 class="popup-header__title">当前聊天页控制台</h1>
+          <p class="popup-header__hint" id="popup-tab-hint">当前页：检测中...</p>
         </div>
-        <button id="open-settings" class="button button--ghost" type="button">完整设置</button>
+        <div class="badge-row">
+          <span class="popup-badge popup-badge--soft" id="popup-site-badge">检测中</span>
+          <span class="popup-badge popup-badge--soft" id="popup-live-badge">等待连接</span>
+        </div>
       </header>
 
       <section class="panel panel--status">
-        <div class="panel__head panel__head--stacked">
+        <div class="panel__head">
           <div>
-            <h2 class="panel__title">当前页面</h2>
+            <h2 class="panel__title">状态</h2>
             <p class="panel__desc" id="popup-summary">正在分析当前页面状态与可用能力。</p>
           </div>
-          <div class="badge-row">
-            <span class="popup-badge popup-badge--soft" id="popup-site-badge">检测中</span>
-            <span class="popup-badge popup-badge--soft" id="popup-live-badge">等待连接</span>
-          </div>
         </div>
-        <div class="metric-grid">
-          <div class="metric-card">
-            <span class="metric-card__label">时间轴</span>
-            <strong class="metric-card__value" id="popup-stat-timeline">-</strong>
+        <div class="stat-grid">
+          <div class="stat-card">
+            <span class="stat-card__label">时间轴</span>
+            <strong class="stat-card__value" id="popup-stat-timeline">-</strong>
           </div>
-          <div class="metric-card">
-            <span class="metric-card__label">滚动模式</span>
-            <strong class="metric-card__value" id="popup-stat-scroll-mode">-</strong>
+          <div class="stat-card">
+            <span class="stat-card__label">滚动模式</span>
+            <strong class="stat-card__value" id="popup-stat-scroll-mode">-</strong>
           </div>
-          <div class="metric-card">
-            <span class="metric-card__label">本地同步</span>
-            <strong class="metric-card__value" id="popup-stat-sync">-</strong>
+          <div class="stat-card">
+            <span class="stat-card__label">VSCode Bridge</span>
+            <strong class="stat-card__value" id="popup-stat-sync">-</strong>
           </div>
         </div>
       </section>
@@ -49,68 +46,123 @@
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h2 class="panel__title">快速设置</h2>
-            <p class="panel__desc">改完立即推送到当前聊天页面。</p>
+            <h2 class="panel__title">导航与阅读</h2>
+            <p class="panel__desc">影响当前聊天页阅读、导航和标题信息的设置。</p>
           </div>
         </div>
-        <div class="control-grid">
-          <label class="setting setting--toggle">
-            <div class="setting__meta">
-              <span class="setting__label">启用时间轴</span>
-              <span class="setting__hint">控制右侧时间线显示</span>
-            </div>
+        <div class="settings-grid">
+          <label class="toggle-row">
             <input id="setting-timeline-enabled" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">启用时间轴</span>
+              <span class="toggle-row__hint">显示右侧轮次导航和跳转。</span>
+            </span>
           </label>
-          <label class="setting setting--toggle">
-            <div class="setting__meta">
-              <span class="setting__label">自动归档</span>
-              <span class="setting__hint">默认仅保留最近 10 轮</span>
-            </div>
-            <input id="setting-history-cleaner-auto-maintain" type="checkbox">
-          </label>
-          <label class="setting setting--field">
-            <span class="setting__label">公式复制格式</span>
-            <select id="setting-formula-format"></select>
-          </label>
-          <label class="setting setting--field">
-            <span class="setting__label">时间线滚动模式</span>
+          <label class="field-card">
+            <span class="field-card__label">时间线滚动模式</span>
             <select id="setting-timeline-scroll-mode"></select>
           </label>
+          <label class="field-card">
+            <span class="field-card__label">公式复制格式</span>
+            <select id="setting-formula-format"></select>
+          </label>
+          <label class="toggle-row">
+            <input id="setting-title-updater-enabled" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">标签标题同步</span>
+              <span class="toggle-row__hint">浏览器标签跟随当前会话标题。</span>
+            </span>
+          </label>
+          <label class="toggle-row">
+            <input id="setting-title-updater-include-folder" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">标题包含文件夹前缀</span>
+              <span class="toggle-row__hint">多项目并行时更容易分辨标签页。</span>
+            </span>
+          </label>
+          <label class="toggle-row">
+            <input id="setting-sidebar-autohide-enabled" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">侧栏自动隐藏</span>
+              <span class="toggle-row__hint">离开左侧后自动收起原生侧栏。</span>
+            </span>
+          </label>
+          <label class="toggle-row">
+            <input id="setting-markdown-patcher-enabled" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">Markdown 修复增强</span>
+              <span class="toggle-row__hint">修补粗体等语法被宿主 DOM 打断的问题。</span>
+            </span>
+          </label>
+          <label class="toggle-row">
+            <input id="setting-snow-effect-enabled" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">雪花动效</span>
+              <span class="toggle-row__hint">装饰效果，默认建议关闭。</span>
+            </span>
+          </label>
         </div>
       </section>
 
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h2 class="panel__title">页面动作</h2>
-            <p class="panel__desc">针对当前会话执行一次性检查、裁剪和同步。</p>
+            <h2 class="panel__title">页面整理</h2>
+            <p class="panel__desc">面向长会话的显示裁剪、导出范围和侧栏细节。</p>
           </div>
         </div>
-        <div class="action-stack">
-          <label class="setting setting--field setting--compact">
-            <span class="setting__label">保留最近轮数</span>
+        <div class="settings-grid">
+          <label class="field-card field-card--span-2">
+            <span class="field-card__label">文件夹层级间距</span>
+            <div class="range-row">
+              <input id="setting-folder-spacing" type="range" min="0" max="16" step="1">
+              <span id="setting-folder-spacing-value">2px</span>
+            </div>
+          </label>
+          <label class="field-card field-card--span-2">
+            <span class="field-card__label">渲染导出范围</span>
+            <select id="setting-export-render-scope"></select>
+          </label>
+          <label class="field-card">
+            <span class="field-card__label">保留最近轮数</span>
             <input id="setting-history-cleaner-keep-rounds" type="number" min="1" max="100" step="1">
           </label>
-          <div class="button-row">
+          <label class="toggle-row">
+            <input id="setting-history-cleaner-auto-maintain" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">自动维持最近 N 轮</span>
+              <span class="toggle-row__hint">持续聊天时自动收紧 live window。</span>
+            </span>
+          </label>
+          <div class="action-row action-row--span-2">
             <button id="history-cleaner-check" class="button button--ghost" type="button">查看轮数</button>
             <button id="history-cleaner-trim" class="button button--primary" type="button">立即裁剪</button>
           </div>
-          <label class="setting setting--toggle setting--full">
-            <div class="setting__meta">
-              <span class="setting__label">启用本地同步</span>
-              <span class="setting__hint">连接 127.0.0.1 本地服务</span>
-            </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h2 class="panel__title">本地同步</h2>
+            <p class="panel__desc">连接本地 VSCode Bridge，让 ChatGPT 网页版直接读取当前工作区和选中代码。</p>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <label class="toggle-row toggle-row--span-2">
             <input id="setting-context-sync-enabled" type="checkbox">
+            <span class="toggle-row__meta">
+              <span class="toggle-row__title">启用本地同步</span>
+              <span class="toggle-row__hint">通过 localhost 上的 VSCode Bridge 提供活动文件、选区和工作区摘要。</span>
+            </span>
           </label>
-          <div class="sync-grid">
-            <label class="setting setting--field setting--compact">
-              <span class="setting__label">同步端口</span>
-              <input id="setting-context-sync-port" type="number" min="1" max="65535" step="1">
-            </label>
-            <div class="sync-box">
-              <span id="context-sync-online" class="sync-pill is-offline">离线</span>
-              <button id="context-sync-push" class="button button--primary" type="button">同步当前会话</button>
-            </div>
+          <label class="field-card">
+            <span class="field-card__label">同步端口</span>
+            <input id="setting-context-sync-port" type="number" min="1" max="65535" step="1">
+          </label>
+          <div class="sync-card">
+            <span id="context-sync-online" class="sync-pill is-offline">离线</span>
+            <button id="context-sync-push" class="button button--primary" type="button">推送当前网页会话</button>
           </div>
         </div>
       </section>

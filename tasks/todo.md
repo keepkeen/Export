@@ -1,5 +1,189 @@
 # Todo
 
+## Iteration 46 Goal
+- 在不触发仓库禁止项的前提下恢复正式打包链路，允许直接运行 `./scripts/build-crx.sh`。
+- 继续优化 README，让功能边界、安装路径、VSCode Bridge 用法和当前产品定位更清晰。
+- 完成验证后提交并推送到 GitHub。
+
+## Iteration 46 Plan
+- [x] 改造 `scripts/build-crx.sh`，去掉 `rm -rf` 依赖，改为基于临时目录的安全打包流程。
+- [x] 收敛 `README.md`，明确 ChatGPT-first、VSCode Bridge、本地同步和打包/安装方式。
+- [x] 运行静态校验与正式打包。
+- [ ] 提交并推送到 `origin/main`。
+
+## Iteration 46 Acceptance
+- [x] `./scripts/build-crx.sh` 可直接运行，生成最新 zip/crx 产物。
+- [x] README 与当前实现一致，不再保留过时的信息架构或模糊文案。
+- [ ] 改动完成后已提交并推送到 GitHub。
+
+## Iteration 46 Review
+- `scripts/build-crx.sh`
+  - 打包流程改为基于 `mktemp` 的工作目录，不再依赖 `rm -rf` 清理 `dist` 内部目录。
+  - ZIP 和 CRX 先在临时工作目录生成，再原子移动到最终路径。
+- `README.md`
+  - 重写为更贴近当前产品能力的说明：强调 ChatGPT-first、VSCode Bridge、真实安装方式和使用路径。
+  - 把“浏览器扩展单独使用”和“浏览器扩展 + VSCode Bridge”两条路径拆开写清楚。
+- 验证：
+  - `bash -n scripts/build-crx.sh`
+  - `rg -n "rm -rf" scripts/build-crx.sh README.md src integrations tasks`
+  - `node --check src/service-worker.js`
+  - `node --check src/context-sync-feature.js`
+  - `node --check src/content-script.js`
+  - `node --check integrations/vscode-threadatlas/extension.js`
+  - `./scripts/build-crx.sh`
+
+## Iteration 45 Goal
+- 把现有“手动把网页会话 POST 到 localhost”的简陋 context sync，升级成可实际连接 VSCode 的本地桥接能力。
+- 在 ChatGPT 网页输入区提供 VSCode 上下文栏，默认展示当前工作区/文件/选区，并在发送时自动附加去重后的上下文。
+- 在仓库内提供可运行的 VSCode 扩展实现，本地暴露 HTTP 接口给浏览器扩展调用，不依赖 OpenAI API。
+
+## Iteration 45 Plan
+- [x] 设计并实现本地桥接协议：`/health`、`/active-context`、`/conversation/prepare`、`/conversation/mark-sent`，同时兼容现有 `/sync` 检查/推送。
+- [x] 扩展 service worker 升级本地 sync 通信层，支持状态检查、读取当前 VSCode 上下文、准备发送内容和发送后标记去重。
+- [x] 为 ChatGPT 页面新增 VSCode 上下文功能模块：输入区上方引用栏、活跃上下文轮询、发送前自动注入、失败兜底与路由清理。
+- [x] 在仓库内新增零依赖 VSCode 扩展，采集当前工作区/活动文件/选区/打开文件/dirty 状态/诊断信息，并运行本地 HTTP 服务。
+- [x] 更新 popup/README 文案与说明，确保用户知道如何安装 VSCode 扩展并启用本地桥接。
+- [x] 运行静态校验、浏览器扩展打包与本地桥接脚本检查，补写 review。
+
+## Iteration 45 Acceptance
+- [x] 浏览器扩展启用本地同步后，能检测本地 VSCode 桥接在线状态。
+- [x] ChatGPT 输入区可看到当前 VSCode 活跃上下文，选中代码时默认以引用态显示。
+- [x] 用户发送消息时，扩展会自动附加本次未发送过的必要上下文，而不是每次重复塞整段工作区信息。
+- [x] 本地桥接能按 conversation 记录已发送上下文，代码变更后会因内容 hash 变化重新发送。
+- [x] 仓库内包含可安装的 VSCode 扩展实现与使用说明。
+- [x] `node --check`、JSON 校验和非破坏性预览打包通过；未运行仓库内会清空目录的 `./scripts/build-crx.sh`。
+
+## Iteration 45 Review
+- `src/service-worker.js`
+  - 本地同步协议从单一 `/sync` 扩展为 `/health`、`/active-context`、`/conversation/prepare`、`/conversation/mark-sent`。
+  - 新增本地桥接状态读取、准备消息、发送后去重标记等消息类型；原来的“推送当前网页会话”继续兼容。
+- `src/context-sync-feature.js`
+  - 新增 ChatGPT 输入区上的 VSCode 上下文栏。
+  - 会轮询本地桥接的活跃上下文，显示工作区、活动文件、选中代码/光标附近片段、dirty 文件和诊断摘要。
+  - 发送消息时会先拦截提交，向本地桥接请求“本轮未发送过的上下文块”，插入后再继续发送，并回写 sent-cache。
+- `src/content-script.js`
+  - 接入新 feature 的初始化和设置同步链路，使 popup 中的本地同步开关和端口能实时作用到页面内上下文栏。
+- `src/styles.css`
+  - 为输入区上的 VSCode 上下文栏补齐简约样式，移动端时会折叠为纵向布局。
+- `integrations/vscode-threadatlas/package.json`
+  - 新增零依赖 VSCode 扩展 manifest、命令和配置项。
+- `integrations/vscode-threadatlas/extension.js`
+  - 新增本地 HTTP bridge：采集活动文件、选区、excerpt、open files、dirty files、diagnostics 和 git status。
+  - 按 conversation 维护 sent-id 去重缓存；内容 hash 变化后会自然重新发送。
+  - 暴露健康检查、活跃上下文读取、准备消息和 mark-sent 接口。
+- `integrations/vscode-threadatlas/README.md`
+  - 补充 VSCode Bridge 的本地运行与打包说明。
+- `src/popup.html`
+  - 本地同步文案改为明确面向 VSCode Bridge，同时保留“推送当前网页会话”按钮，便于把网页会话送回本地服务。
+- `src/popup.js`
+  - popup 状态文案改为 VSCode Bridge 语义，推送按钮文案也改成网页会话推送。
+- `README.md`
+  - 更新产品说明：补充 VSCode Bridge、输入区上下文栏和安装步骤，移除过时的 popup/options 架构描述。
+- 验证：
+  - `node --check src/service-worker.js`
+  - `node --check src/context-sync-feature.js`
+  - `node --check src/content-script.js`
+  - `node --check src/popup.js`
+  - `node --check integrations/vscode-threadatlas/extension.js`
+  - `node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); JSON.parse(require('fs').readFileSync('integrations/vscode-threadatlas/package.json','utf8')); console.log('json ok')"`
+  - `zip -qr dist/threadatlas-browser-preview.zip manifest.json README.md src icons vendor`
+  - `cd integrations/vscode-threadatlas && zip -qr ../../dist/threadatlas-vscode-bridge-preview.zip package.json README.md extension.js`
+
+## Iteration 44 Goal
+- 修正时间线 active 高亮“不明显”和轨道滚轮与页面滚动互相抢控制权的问题。
+- 把完整设置并回 popup，取消“popup + 单独完整设置页”的分裂入口，同时把 UI 收敛到更简约的风格。
+- 保持现有设置绑定和即时下发链路不被打断。
+
+## Iteration 44 Plan
+- [x] 在 lessons 中记录用户对时间线交互、popup 架构和 folder UX 的纠偏，补充本轮计划。
+- [x] 调整 timeline 轨道宽度、可见点数和 active 样式，并移除 wheel 抢占逻辑，优先走原生滚动。
+- [x] 将 options 中的完整设置并入 popup，移除单独“完整设置”入口，重构 popup 为简约布局。
+- [x] 优化 folder 的高频交互，改成当前会话点击式分配，并让新建文件夹默认分配到当前会话。
+- [x] 运行静态校验与打包，补写 review。
+
+## Iteration 44 Acceptance
+- [x] 时间线 active dot 在滚动时清晰可见。
+- [x] 鼠标位于时间线柱子上时，滚轮滚动不再发涩或与页面滚动打架。
+- [x] popup 内可直接访问完整设置，不再依赖单独“完整设置”入口。
+- [x] popup UI 收敛为更简约的视觉。
+- [x] 文件夹高频操作从下拉切到点击式分配，创建后会自动分配到当前会话。
+- [x] `node --check` 与 `./scripts/build-crx.sh` 通过。
+
+## Iteration 44 Review
+- `tasks/lessons.md`
+  - 记录了三条用户纠偏：时间线 active / wheel 交互、popup 不能继续分裂为单独完整设置页、文件夹高频操作不能再依赖费劲的下拉流程。
+- `src/timeline-feature.js`
+  - 提高 dot 间距并降低可见点数上限，让长会话时间线在默认视窗里更疏、更好辨认。
+  - 取消内容脚本对时间线 `wheel` 的手动接管，恢复原生滚动行为，避免轨道和页面滚动互相抢控制权。
+- `src/styles.css`
+  - 时间线轨道缩窄为更轻的柱体，scrollable 宽度也收紧。
+  - active dot 的高亮样式加强：更大的缩放、环形外晕和更明显的发光。
+  - 文件夹当前会话区域新增 `ced-folder-assign-list / chip` 样式，支持点击式分配。
+- `src/popup.html`
+  - popup 改为单入口完整设置，不再保留“完整设置”跳转按钮。
+  - 合并导航与阅读、页面整理、本地同步三块完整设置，把原 `options` 页中的主要控件都挪回 popup。
+- `src/popup.css`
+  - 视觉改回更克制的简约样式，去掉过强装饰和大面积花哨背景。
+- `manifest.json`
+  - 移除了 `options_page`，不再暴露独立设置页入口。
+- `src/folder-feature.js`
+  - 当前会话文件夹分配改为可点击的文件夹标签，不再主要依赖隐藏 select。
+  - 从面板或侧栏新建文件夹时，如果当前在会话页，会自动把新文件夹分配给当前会话；若同名文件夹已存在，则直接把当前会话分配过去。
+- 验证：
+  - `node --check src/folder-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/content-script.js`
+  - `node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest ok')"`
+  - `./scripts/build-crx.sh`
+- 产物：
+  - `dist/threadatlas.zip`
+  - `dist/threadatlas.crx`
+
+## Iteration 43 Goal
+- 把 ChatGPT 文件夹能力严格限制在真实对话页，仅在 `/c/<conversation-id>` 会话界面显示，不再在首页或其它 ChatGPT 页面露出。
+- 修复右侧时间线的当前轮次高亮跟随，并为长会话引入“固定舒适点数 + 轨道内滚动窗口”的交互。
+- 重做 popup 信息架构与视觉层次，降低机械感，保留现有设置链路与即时下发行为。
+
+## Iteration 43 Plan
+- [x] 收紧 ChatGPT 文件夹的显示条件：以当前会话 id 作为硬门槛，未进入会话页时隐藏侧栏文件夹与面板文件夹模块。
+- [x] 调整 timeline active marker 与 dot 渲染：增强 viewport 判定，加入自适应可见点数、轨道滚动窗口和独立滚动条。
+- [x] 重构 popup HTML/CSS，保留现有 JS 绑定 id，优化状态区、快速设置和页面动作的层次与观感。
+- [x] 运行静态校验与打包，补写本轮 review。
+
+## Iteration 43 Acceptance
+- [x] 文件夹 UI 仅在 ChatGPT 会话页出现。
+- [x] 页面滚动到对应轮次时，时间线 active dot 会稳定跟随。
+- [x] 超长会话下时间线保持固定舒适数量的可见点，并支持在轨道上滚动查看更多点。
+- [x] popup UI 完成重构且现有设置功能仍可初始化。
+- [x] `node --check` 与 `./scripts/build-crx.sh` 通过。
+
+## Iteration 43 Review
+- `src/folder-feature.js`
+  - 新增 `isConversationRouteActive()`，把文件夹能力严格绑到 `/c/<conversation-id>` 会话路由。
+  - 侧栏文件夹在非会话页会主动 `detachSidebarSection()`，不再出现在 ChatGPT 首页或其它非对话界面。
+  - 工作区面板里的文件夹 section 在非会话页改为 `hidden`，避免“页面里还保留一个空文件夹模块”。
+- `src/timeline-feature.js`
+  - active marker 判定从“取 reference 之前最后一个点”改成“围绕 viewport 中线取最近 marker”，滚动时高亮更稳定。
+  - dot 渲染改成自适应可见容量：按当前时间线高度推算舒适点数，超长会话时轨道内部启用滚动窗口与细滚动条，不再把所有点硬压在一根轨上。
+  - active dot 变化时会自动滚入轨道视窗；滚轮优先滚动时间线轨道，到边界后再回退到页面滚动。
+- `src/styles.css`
+  - 文件夹 section 增加 `[hidden]` 显示兜底。
+  - 时间线 bar/track/dots 样式升级：更宽的轨道、可见滚动条、滚动态渐隐边缘和轨道中线。
+- `src/popup.html`
+  - popup 结构改为 `hero-card + quick settings + page actions` 三段式，保留原有控件 id，避免打断 JS 绑定。
+- `src/popup.css`
+  - 重做 popup 视觉语言：暖色磨砂背景、状态 hero、卡片式设置区和更明确的动作区层次，减少“表单堆叠”的机械感。
+- 验证：
+  - `node --check src/folder-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/content-script.js`
+  - `./scripts/build-crx.sh`
+- 产物：
+  - `dist/threadatlas.zip`
+  - `dist/threadatlas.crx`
+
 ## Iteration 42 Goal
 - 将当前工作区里的已完成功能更新整理成一次可验证的 GitHub 推送。
 - 在提交前完成仓库现有可执行校验：静态语法检查与扩展打包。

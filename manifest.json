@@ -63,6 +63,7 @@
         "src/folder-spacing-feature.js",
         "src/markdown-patcher-feature.js",
         "src/snow-effect-feature.js",
+        "src/context-sync-feature.js",
         "src/history-cleaner-feature.js",
         "src/content-script.js"
       ],
@@ -104,7 +105,6 @@
       "48": "icons/icon-48.png"
     }
   },
-  "options_page": "src/options.html",
   "commands": {
     "toggle_chatgpt_exporter": {
       "suggested_key": {

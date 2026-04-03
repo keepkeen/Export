@@ -531,6 +531,7 @@
     initFolderSpacingFeature();
     initMarkdownPatcherFeature();
     initSnowEffectFeature();
+    initContextSyncFeature();
     attachPanel();
     refreshConversationMetaOnly();
     await refreshConversationSnapshot({ full: false, reason: 'init-live', syncUi: true });
@@ -3096,6 +3097,31 @@
     window.__cedSnowEffect?.setEnabled?.(state.snowEffectEnabled);
   }
 
+  function initContextSyncFeature() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.contextSyncEnabled = normalizeContextSyncEnabled(state.contextSyncEnabled);
+    state.contextSyncPort = normalizeContextSyncPort(state.contextSyncPort);
+    window.__cedContextSyncFeature?.initialize?.({
+      enabled: state.contextSyncEnabled,
+      port: state.contextSyncPort,
+      requestConversationId: () => getCurrentConversationId(),
+      requestPageUrl: () => location.href,
+      requestSiteKey: () => SITE_KEY,
+      notify: (message) => showToast(message)
+    });
+  }
+
+  function syncContextSyncFeatureConfig() {
+    if (SITE_KEY !== SITE_KEYS.chatgpt) return;
+    state.contextSyncEnabled = normalizeContextSyncEnabled(state.contextSyncEnabled);
+    state.contextSyncPort = normalizeContextSyncPort(state.contextSyncPort);
+    window.__cedContextSyncFeature?.setPort?.(state.contextSyncPort);
+    window.__cedContextSyncFeature?.setEnabled?.(state.contextSyncEnabled);
+    if (state.contextSyncEnabled) {
+      window.__cedContextSyncFeature?.refresh?.({ force: true });
+    }
+  }
+
   function initHistoryCleanerFeature() {
     if (SITE_KEY !== SITE_KEYS.chatgpt) return;
     state.historyCleanerKeepRounds = normalizeHistoryCleanerKeepRounds(state.historyCleanerKeepRounds);
@@ -3419,6 +3445,7 @@
       if (shouldPersist) {
         persist(STORAGE_KEYS.contextSyncEnabled, state.contextSyncEnabled);
       }
+      syncContextSyncFeatureConfig();
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, STORAGE_KEYS.contextSyncPort)) {
@@ -3426,6 +3453,7 @@
       if (shouldPersist) {
         persist(STORAGE_KEYS.contextSyncPort, state.contextSyncPort);
       }
+      syncContextSyncFeatureConfig();
     }
 
     if (dockChanged && state.panelEl) {

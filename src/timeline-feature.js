@@ -144,6 +144,7 @@
       this.markerIndexById = new Map();
       this.dotOffsets = [];
       this.markerRenderSignature = '';
+      this.visibleMarkerCapacity = 0;
       this.exportFileNameTimer = null;
       this.previewOpenTimer = null;
       this.previewCloseTimer = null;
@@ -244,6 +245,7 @@
       this.markerTopLayoutSignature = '';
       this.markerIndexById.clear();
       this.dotOffsets = [];
+      this.visibleMarkerCapacity = 0;
       this.markerMeta.clear();
       this.activeIndex = -1;
       this.initialized = false;
@@ -891,14 +893,58 @@
       return Math.max(8, parsed);
     }
 
+    getDotPitchPx() {
+      const barHeight = this.ui.bar?.clientHeight || window.innerHeight || 720;
+      return Math.round(Math.max(20, Math.min(30, barHeight / 24)));
+    }
+
+    getVisibleMarkerCapacity(trackHeight, inset, pitch) {
+      const usableHeight = Math.max(1, Math.round((trackHeight || 0) - inset * 2));
+      const estimated = Math.floor(usableHeight / Math.max(14, pitch));
+      return clamp(estimated, 8, 22);
+    }
+
+    syncTrackScrollableState() {
+      if (!(this.ui.track instanceof HTMLElement)) return;
+      const scrollable = this.ui.track.scrollHeight > this.ui.track.clientHeight + 4;
+      this.ui.track.classList.toggle('ced-timeline-track--scrollable', scrollable);
+      this.ui.bar?.classList.toggle('ced-timeline-bar--scrollable', scrollable);
+    }
+
+    ensureMarkerVisible(index, behavior = 'auto') {
+      if (!(this.ui.track instanceof HTMLElement)) return;
+      if (index < 0 || index >= this.markers.length) return;
+      if (this.ui.track.scrollHeight <= this.ui.track.clientHeight + 4) return;
+      const marker = this.markers[index];
+      const dot = marker?.dot;
+      if (!(dot instanceof HTMLElement)) return;
+      const dotTop = dot.offsetTop;
+      const dotHeight = dot.offsetHeight || 12;
+      const target = clamp(
+        dotTop - this.ui.track.clientHeight / 2 + dotHeight / 2,
+        0,
+        Math.max(0, this.ui.track.scrollHeight - this.ui.track.clientHeight)
+      );
+      if (Math.abs(this.ui.track.scrollTop - target) <= 6) return;
+      if (typeof this.ui.track.scrollTo === 'function') {
+        this.ui.track.scrollTo({ top: target, behavior });
+        return;
+      }
+      this.ui.track.scrollTop = target;
+    }
+
     renderMarkers() {
       if (!this.ui.dots || !this.ui.track) return;
+      const previousScrollTop = this.ui.track.scrollTop || 0;
       this.ui.dots.replaceChildren();
       this.dotOffsets = [];
+      this.visibleMarkerCapacity = 0;
 
       if (!this.markers.length) {
         this.ui.bar?.classList.add('ced-timeline-bar--empty');
         this.ui.dots.style.height = '100%';
+        this.ui.track.scrollTop = 0;
+        this.syncTrackScrollableState();
         return;
       }
       this.ui.bar?.classList.remove('ced-timeline-bar--empty');
@@ -907,8 +953,14 @@
       const trackHeight = Math.max(1, this.ui.track.clientHeight || 1);
       const inset = this.getTrackPaddingPx();
       const usableHeight = Math.max(1, trackHeight - inset * 2);
-      this.ui.dots.style.height = '100%';
-      this.ui.track.scrollTop = 0;
+      const pitch = this.getDotPitchPx();
+      const visibleCapacity = this.getVisibleMarkerCapacity(trackHeight, inset, pitch);
+      const scrollable = total > visibleCapacity;
+      const contentHeight = scrollable
+        ? Math.max(trackHeight, inset * 2 + Math.max(0, total - 1) * pitch + 2)
+        : Math.max(trackHeight, inset * 2 + usableHeight);
+      this.visibleMarkerCapacity = visibleCapacity;
+      this.ui.dots.style.height = `${contentHeight}px`;
 
       const frag = document.createDocumentFragment();
       this.markers.forEach((marker, index) => {
@@ -920,8 +972,9 @@
         dot.dataset.markerId = marker.id;
         dot.setAttribute('aria-label', marker.summary || `Turn ${marker.displayIndex || index + 1}`);
 
-        const n = total <= 1 ? 0.5 : index / (total - 1);
-        const topPx = inset + n * usableHeight;
+        const topPx = scrollable
+          ? inset + index * pitch
+          : (total <= 1 ? (inset + usableHeight / 2) : (inset + (index / (total - 1)) * usableHeight));
         dot.style.top = `${topPx.toFixed(2)}px`;
 
         this.dotOffsets[index] = topPx;
@@ -930,6 +983,16 @@
         frag.appendChild(dot);
       });
       this.ui.dots.appendChild(frag);
+      this.syncTrackScrollableState();
+      if (scrollable) {
+        const maxScrollTop = Math.max(0, this.ui.track.scrollHeight - this.ui.track.clientHeight);
+        this.ui.track.scrollTop = clamp(previousScrollTop, 0, maxScrollTop);
+      } else {
+        this.ui.track.scrollTop = 0;
+      }
+      if (this.activeIndex >= 0) {
+        this.ensureMarkerVisible(this.activeIndex, 'auto');
+      }
     }
 
     renderPreviewList() {
@@ -996,6 +1059,7 @@
       this.markers.forEach((marker) => {
         this.syncDotState(marker);
       });
+      this.ensureMarkerVisible(nextIndex, 'auto');
       this.highlightPreviewActiveItem();
       this.emitActiveChange();
     }
@@ -1083,22 +1147,33 @@
       if (this.isProgrammaticScroll) return;
 
       const scrollTop = this.getContainerScrollTop();
-      const reference = scrollTop + this.getContainerClientHeight() * 0.45;
+      const reference = scrollTop + this.getContainerClientHeight() * 0.5;
       let active = 0;
       if (this.markerTops.length === this.markers.length && this.markerTops.length) {
-        active = clamp(this.upperBound(this.markerTops, reference), 0, this.markers.length - 1);
+        const lowerIndex = clamp(this.upperBound(this.markerTops, reference), 0, this.markers.length - 1);
+        const upperIndex = clamp(lowerIndex + 1, 0, this.markers.length - 1);
+        const lowerDistance = Math.abs((this.markerTops[lowerIndex] ?? 0) - reference);
+        const upperDistance = Math.abs((this.markerTops[upperIndex] ?? Number.POSITIVE_INFINITY) - reference);
+        active = upperDistance < lowerDistance ? upperIndex : lowerIndex;
       } else {
         const containerRect = this.getContainerRect();
+        let bestDistance = Number.POSITIVE_INFINITY;
         for (let i = 0; i < this.markers.length; i++) {
           const marker = this.markers[i];
           if (!marker?.element) continue;
           const top = marker.element.getBoundingClientRect().top - containerRect.top + scrollTop;
-          if (top <= reference) {
+          const distance = Math.abs(top - reference);
+          if (distance <= bestDistance) {
+            bestDistance = distance;
             active = i;
-          } else {
-            break;
+            continue;
           }
+          if (top > reference && distance > bestDistance) break;
         }
+      }
+      if (active === this.activeIndex) {
+        this.ensureMarkerVisible(active, 'auto');
+        return;
       }
       this.scheduleActiveIndex(active);
     }
@@ -1546,12 +1621,7 @@
     }
 
     handleTimelineWheel(event) {
-      if (!this.enabled || !this.scrollContainer) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const delta = Number(event.deltaY || 0);
-      this.setContainerScrollTop(this.getContainerScrollTop() + delta);
-      this.handleScroll();
+      if (!this.enabled) return;
     }
 
     handlePreviewListWheel(event) {
