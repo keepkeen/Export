@@ -6,19 +6,46 @@
 - 在 `tasks/todo.md` 中记录本轮发布计划、验证结果与推送状态。
 
 ## Iteration 42 Plan
-- [ ] 复核当前工作区改动与远程分支状态，确认推送目标为 `origin/main`。
-- [ ] 运行本仓库现有校验：对新增/核心脚本执行 `node --check`，并运行 `./scripts/build-crx.sh`。
-- [ ] 汇总变更、创建提交、推送到 GitHub。
-- [ ] 补写本轮 review，记录校验与推送结果。
+- [x] 复核当前工作区改动与远程分支状态，确认推送目标为 `origin/main`。
+- [x] 运行本仓库现有校验：对新增/核心脚本执行 `node --check`，并运行 `./scripts/build-crx.sh`。
+- [x] 汇总变更、创建提交、推送到 GitHub。
+- [x] 补写本轮 review，记录校验与推送结果。
 
 ## Iteration 42 Acceptance
-- [ ] `git status` 仅包含本轮要提交的文件。
-- [ ] 静态语法检查通过。
-- [ ] `./scripts/build-crx.sh` 成功产出发布包。
-- [ ] 提交已推送到 `origin/main`。
+- [x] `git status` 仅包含本轮要提交的文件。
+- [x] 静态语法检查通过。
+- [x] `./scripts/build-crx.sh` 成功产出发布包。
+- [x] 提交已推送到 `origin/main`。
 
 ## Iteration 42 Review
-- 待完成。
+- 目标仓库与远端：
+  - 本地分支：`main`
+  - 远端：`origin https://github.com/keepkeen/Export.git`
+- 本轮发布提交：
+  - `f97e79f feat: refactor conversation snapshot and export workflow`
+  - 已推送到 `origin/main`，远端分支从 `aac6831` 更新到 `f97e79f`
+- 验证：
+  - `node --check src/content-script.js`
+  - `node --check src/folder-feature.js`
+  - `node --check src/formula-copy-feature.js`
+  - `node --check src/history-cleaner-feature.js`
+  - `node --check src/markdown-patcher-feature.js`
+  - `node --check src/popup.js`
+  - `node --check src/sidebar-autohide-feature.js`
+  - `node --check src/timeline-feature.js`
+  - `node --check src/title-updater-feature.js`
+  - `node --check src/chatgpt-conversation-parser.js`
+  - `node --check src/conversation-kernel.js`
+  - `node --check src/export-engine.js`
+  - `node --check src/history-archive-controller.js`
+  - `node --check src/history-window-manager.js`
+  - `node --check src/runtime-scheduler.js`
+  - `./scripts/build-crx.sh`
+- 产物：
+  - `dist/threadatlas.zip`
+  - `dist/threadatlas.crx`
+- 备注：
+  - `dist/` 仍保持忽略状态，未纳入提交。
 
 ## Iteration 41 Goal
 - 将当前解析链路拆成“结构同步（live snapshot）”和“完整快照（full snapshot）”两层，避免 `refreshConversationData()` 一次性承担所有职责。
